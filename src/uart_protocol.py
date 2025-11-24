@@ -25,28 +25,36 @@ class UART:
         if self.state == 0:                         # Check index 0 is HEADER1
             if byte == self.HEADER_1st:     
                 self.state = 1
+                print(byte)
             else:
                 self.state = 0
         elif self.state == 1:                       # Check index 1 is HEARDER2
             if byte == self.HEADER_2st:
                 self.state = 2
+                print(byte)
+
             else:
                 self.state = 0
+
+                
+            # frame = [request, x_pos_mm, y_pos_mm, z_pos_mm]
+                
         elif self.state == 2:                       # if frame is satisfied, add data to buffer and update data.
-            self.buffer.append(byte)
-            if (len(self.buffer) == 3):
-                self.Update_XYZ(self.buffer[0], self.buffer[1], self.buffer[2])
-                frame_xyz = [self.value_x, self.value_y, self.value_z]
-                self.reset_buffer()
-                return frame_xyz
+            print(byte)
+            # self.buffer.append(byte)
+            # if (len(self.buffer) == 3):
+            #     self.Update_XYZ(self.buffer[0], self.buffer[1], self.buffer[2])
+            #     frame_xyz = [self.value_x, self.value_y, self.value_z]
+            #     self.reset_buffer()
+            #     return frame_xyz
             # else:
             #     return None
             
-    def send_data(self, value_x, value_y, value_z, ser=None):
+    def send_data(self, value_x=None, value_y=None, value_z=None, ser=None):
         frame = [
             self.HEADER_1st,
             self.HEADER_2st,
-            [value_x, value_y, value_z]      # This code maybe get error because python cannot byte a list.
+            # [value_x, value_y, value_z]      # This code maybe get error because python cannot byte a list.
         ]
         if ser is not None:
             ser.write(bytes(frame))
