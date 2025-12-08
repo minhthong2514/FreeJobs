@@ -14,3 +14,8 @@ sudo chmod 666 /dev/ttyUSB0
 python3 main.py
 ```
 ---
+
+## Clone my project
+```bash
+git clone https://github.com/minhthong2514/FreeJobs.git
+```
