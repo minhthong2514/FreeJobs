@@ -2,6 +2,7 @@ import serial
 import time
 from uart_protocol import UART
 import struct
+import logging
 
 # Format String:
 # <  = Little Endian (Standard for ESP32/Jetson)
@@ -29,23 +30,58 @@ REQUEST_TYPES = {
     3: "MOVE_Y",
     4: "MOVE_Z"
 }
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 while True:
+    if ser.read(1) == bytes([HEADER_1st]):
+        print('header 1 ok')
+        if ser.read(1) == bytes([HEADER_2st]): 
+            print('header 2 ok')
+            print(f"Waiting for packets (Size: {PACKET_SIZE} bytes)...")
+            payload = ser.read(PACKET_SIZE)
+            req_val, x_pos_mm, y_pos_mm, z_pos_mm = uart.get_data(payload, STRUCT_FORMAT, PACKET_SIZE)
+            req_name = REQUEST_TYPES.get(req_val, "UNKNOWN")
+               
+            print("-" * 30)
+            print(f"Request Type : {req_name} ({req_val})")
+            print(f"X Position   : {x_pos_mm} mm")
+            print(f"Y Position   : {y_pos_mm} mm")
+            print(f"Z Position   : {z_pos_mm} mm")
+        else:
+            print('ERROR: Incomplete packet received.')
+    
+    time.sleep(3)
+
+    uart.send_data(2, 40, 30, 50, ser) #move X
+    time.sleep(3)
+
+    uart.send_data(3, 40, 30, 50, ser) #move Y
+    time.sleep(3)
+
+    uart.send_data(4, 40, 30, 50, ser) #move Z
+    time.sleep(3)
+
+    uart.send_data(0, 0, 0, 0, ser) # Ask current position
+    time.sleep(0.01)
+
     # if ser.read(1) == bytes([HEADER_1st]):
-    #     print('header 1 ok')
+    #     logging.info('header 1 ok')
     #     if ser.read(1) == bytes([HEADER_2st]): 
-    #         print('header 2 ok')
-    #         print(f"Waiting for packets (Size: {PACKET_SIZE} bytes)...")
+    #         logging.info('header 2 ok')
+    #         logging.info(f"Waiting for packets (Size: {PACKET_SIZE} bytes)...")
     #         payload = ser.read(PACKET_SIZE)
     #         req_val, x_pos_mm, y_pos_mm, z_pos_mm = uart.get_data(payload, STRUCT_FORMAT, PACKET_SIZE)
     #         req_name = REQUEST_TYPES.get(req_val, "UNKNOWN")
                
     #         print("-" * 30)
-    #         print(f"Request Type : {req_name} ({req_val})")
-    #         print(f"X Position   : {x_pos_mm} mm")
-    #         print(f"Y Position   : {y_pos_mm} mm")
-    #         print(f"Z Position   : {z_pos_mm} mm")
+    #         logging.info(f"Request Type : {req_name} ({req_val})")
+    #         logging.info(f"X Position   : {x_pos_mm} mm")
+    #         logging.info(f"Y Position   : {y_pos_mm} mm")
+    #         logging.info(f"Z Position   : {z_pos_mm} mm")
     #     else:
     #         print('ERROR: Incomplete packet received.')
-    uart.send_data(0, 1334, 4412, 2232, ser)
-    time.sleep(0.05)
+
+    time.sleep(0.01)
+
+
+    

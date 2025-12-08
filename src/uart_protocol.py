@@ -4,6 +4,9 @@ The data frame is in the following format: [request, x_pos_mm, y_pos_mm, z_pos_m
 """
 
 import struct
+import logging
+
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 class UART:
     # The first is initialized the params.
@@ -39,6 +42,6 @@ class UART:
 
         # Send Payload
         payload = struct.pack(STRUCT_FORMAT, *buffer)           # packaging the buffer for sending.
-        print(payload)
+        logging.info(payload)
         if len(payload) == PACKET_SIZE:                        
             ser.write(payload)
