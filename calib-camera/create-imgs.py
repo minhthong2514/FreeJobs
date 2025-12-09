@@ -1,20 +1,18 @@
 import cv2
 import os
 
-# Open camera
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Can't open the camera.")
     exit()
 
-# Find number at start
-img_count = 1
-while os.path.exists(f"img{img_count}.jpg"):
-    img_count += 1
-print("Press number 1 for shooting / press 'q' to exit.")
+path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/images"
 
-# The path of images folder.
-path = r"F:\FARMBOT\calib-camera\images"
+img_count = 1
+while os.path.exists(os.path.join(path, f"img-{img_count}.jpg")):
+    img_count += 1
+
+print("Press number 1 for shooting / press 'q' to exit.")
 
 while True:
     ret, frame = cap.read()
@@ -23,15 +21,15 @@ while True:
         break
 
     cv2.imshow("Camera", frame)
-
     key = cv2.waitKey(1) & 0xFF
 
     if key == ord('1'):
-        filename = f"fruit{img_count}.jpg"
-        img_path = os.path.join(path,filename)
-        cv2.imwrite(filename, frame)
-        print(f"Save img at: {filename}")
+        filename = f"img-{img_count}.jpg"
+        img_path = os.path.join(path, filename)
+        cv2.imwrite(img_path, frame)
+        print(f"Save img at: {img_path}")
         img_count += 1
+
     elif key == ord('q'):
         print("Exit.")
         break

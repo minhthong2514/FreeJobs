@@ -20,11 +20,15 @@ objpoints = []  # 3D points in real world
 imgpoints = []  # 2D points in image plane
 
 # Load chessboard images
-images = glob.glob(r'F:\\FARMBOT\\calib-camera\\images\\*.jpg')
+images = glob.glob(r'/home/minhthong/Desktop/code/farmbot/calib-camera/images/*.jpg')
 
+img_shape = None
 for fname in images:
     img = cv2.imread(fname)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    if img_shape is None:
+        img_shape = gray.shape[::-1]  # (width, height)
 
     # Detect chessboard corners
     ret, corners = cv2.findChessboardCorners(
@@ -51,7 +55,7 @@ cv2.destroyAllWindows()
 
 # Camera calibration
 ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
-    objpoints, imgpoints, gray.shape[::-1], None, None
+    objpoints, imgpoints, img_shape, None, None
 )
 
 # ---- COMPUTE REPROJECTION ERROR ----
@@ -71,8 +75,8 @@ print("Re-projection error:", mean_error)
 print("Camera matrix (K):", K)
 print("Distortion coefficients:", dist.ravel())
 
-# Save calibration parameters
-fs = cv2.FileStorage("camera_params.yaml", cv2.FILE_STORAGE_WRITE)
-fs.write("K", K)
-fs.write("dist", dist)
-fs.release()
+# # Save calibration parameters
+# fs = cv2.FileStorage("camera_params.yaml", cv2.FILE_STORAGE_WRITE)
+# fs.write("K", K)
+# fs.write("dist", dist)
+# fs.release()
