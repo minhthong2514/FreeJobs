@@ -16,4 +16,3 @@ while True:
 
 # Release the capture and writer objects
 cap.release()
-cv2.destroyAllWindows()
