@@ -3,6 +3,15 @@ This file is using for uart protocol between Jetson nano and MCU.
 The data frame is in the following format: [request, x_pos_mm, y_pos_mm, z_pos_mm].
 """
 
+# Format String:
+# <  = Little Endian (Standard for ESP32/Jetson)
+# B = 1 byte (uint8)
+# b = 1 byte (int8)
+# H = 2 byte (uint16)
+# h = 2 byte (int16)
+# I = 4 byte (uint32)
+# i = 4 byte (int32)
+
 import struct
 import logging
 
@@ -10,9 +19,9 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 class UART:
     # The first is initialized the params.
-    def __init__(self, HEADER_1st, HEADER_2st, ser):
-        self.HEADER_1st = HEADER_1st
-        self.HEADER_2st = HEADER_2st
+    def __init__(self, ser):
+        self.HEADER_1st = 0xAA          # 170
+        self.HEADER_2st = 0x55          # 85
         self.ser = ser
         self.buffer = []
         self.request = None
@@ -20,9 +29,11 @@ class UART:
         self.y_pos_mm = 0
         self.z_pos_mm = 0
         self.gripper = 0
-        self.current_fols = None
-        self.current_bag = None
+        self.current_fols = 0
+        self.current_bag = 0
         self.axes = {"X": 0, "Y": 0, "Z": 0}
+        self.STRUCT_FORMAT = "<BHHHH"     # frame must be little endian and 9 bytes.
+        self.PACKET_SIZE = struct.calcsize(self.STRUCT_FORMAT)  # Should be 9 bytes
 
     # This function is used for receiving data from MCU.
     def get_data(self, payload, struct_format, packet_size):                                    # payload is data read, struct_format is amount of bytes, packet_size is the quantity of packet
@@ -32,8 +43,6 @@ class UART:
      
     # This function is used for sending data to MCU.
     def send_data(self, buffer):
-        STRUCT_FORMAT = "<BHHHH"                                 # frame must be little endian and 7 bytes.
-        PACKET_SIZE = struct.calcsize(STRUCT_FORMAT)            # return the quantity of current packet's byte.
         # buffer = [request, x_pos_mm, y_pos_mm, z_pos_mm]        # this is a temporary data storage for easy updating of new data. 
 
         if self.ser is None:                                         
@@ -46,9 +55,9 @@ class UART:
         self.ser.write(bytes([self.HEADER_2st]))
 
         # Send Payload
-        payload = struct.pack(STRUCT_FORMAT, *buffer)           # packaging the buffer for sending.
+        payload = struct.pack(self.STRUCT_FORMAT, *buffer)           # packaging the buffer for sending.
         # logging.info(payload)
-        if len(payload) == PACKET_SIZE:                        
+        if len(payload) == self.PACKET_SIZE:                        
             self.ser.write(payload)
 
     # This function is used for processing to standard formatting.
@@ -133,3 +142,53 @@ class UART:
                 else:
                     print("\nGripper value must be in range 0-180.\n")
                     continue
+
+    def request_homing(self, request):
+            frame = [request, self.axes["X"], self.axes["Y"], self.axes["Z"], self.gripper]
+            self.send_data(frame)
+            print(f"\nSend data: {frame}\n")
+
+    def send_setup_cmd(self, bags, foils, holder):
+        data = [4] + bags + foils + holder
+        payload = struct.pack("<B" + "B" + "B" +"H"*12, *data)
+        self._transmit(payload)
+
+    def _transmit(self, payload):
+        self.ser.write(bytes([self.HEADER_1st]))
+        self.ser.write(bytes([self.HEADER_2st]))
+        self.ser.write(payload)
+
+    # This functions run in the background of the time
+    def serial_listener(self, REQUEST_TYPES, incoming_mailbox):
+        while True:
+            try:
+                # Check if data exist
+                if self.ser.in_waiting > 0:
+                    if self.ser.read(1) == bytes([self.HEADER_1st]):
+                        print('header 1 ok')
+                        if self.ser.read(1) == bytes([self.HEADER_2st]): 
+                            print('header 2 ok')
+                            print(f"Waiting for packets (Size: {self.PACKET_SIZE} bytes)...")
+                            payload = self.ser.read(self.PACKET_SIZE)
+                            req_val, x_pos_mm, y_pos_mm, z_pos_mm, gripper, current_foil, current_bag = self.get_data(payload, self.STRUCT_FORMAT, self.PACKET_SIZE)
+                            req_name = REQUEST_TYPES.get(req_val, "UNKNOWN")
+                            
+                            print("-" * 30)
+                            print(f"Request Type : {req_name} ({req_val})")
+                            print(f"X Position   : {x_pos_mm} mm")
+                            print(f"Y Position   : {y_pos_mm} mm")
+                            print(f"Z Position   : {z_pos_mm} mm")
+                            print(f"Current Gripper: {gripper} deg")
+                            print(f"Current Foils: {current_foil} pcs")
+                            print(f"Current Bags : {current_bag} pcs")
+                            # Put it Mailbox(Thread-safe)
+                            # This saves the data in RAM safely
+                            result = {"type": req_val, "x": x_pos_mm, "y": y_pos_mm, "z": z_pos_mm, "gripper": gripper,"foil": current_foil, "bag": current_bag}
+                            incoming_mailbox.put(result)
+                            
+                        else:
+                            print('ERROR: Incomplete packet received.')
+            except:
+                pass
+
+        

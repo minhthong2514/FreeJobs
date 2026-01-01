@@ -6,7 +6,7 @@ import glob
 CHECKERBOARD = (10, 7)  # change if your pattern is different
 
 # Square size in mm
-square_size = 25  # 25 mm
+square_size = 5  # 5 mm
 
 # Create 3D points for the real-world plane (Z = 0)
 objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
@@ -33,7 +33,7 @@ for fname in images:
     # Detect chessboard corners
     ret, corners = cv2.findChessboardCorners(
         gray, CHECKERBOARD,
-        cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+        cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE
     )
 
     if ret:
@@ -47,9 +47,9 @@ for fname in images:
 
         imgpoints.append(corners2)
 
-        cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
-        cv2.imshow('Corners', img)
-        cv2.waitKey(0)
+        img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
+    cv2.imshow('Corners', img)
+    cv2.waitKey(0)
 
 cv2.destroyAllWindows()
 
@@ -75,8 +75,13 @@ print("Re-projection error:", mean_error)
 print("Camera matrix (K):", K)
 print("Distortion coefficients:", dist.ravel())
 
-# # Save calibration parameters
-# fs = cv2.FileStorage("camera_params.yaml", cv2.FILE_STORAGE_WRITE)
-# fs.write("K", K)
-# fs.write("dist", dist)
-# fs.release()
+np.savez(
+    "/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz",
+    K=K,
+    dist=dist,
+    rvecs=rvecs,
+    tvecs=tvecs,
+    img_shape=img_shape,
+    reprojection_error=mean_error
+)
+

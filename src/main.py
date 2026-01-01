@@ -1,31 +1,16 @@
 import serial
 import time
 from uart_protocol import UART
-import struct
 import logging
 import threading
 import queue
 
-# Format String:
-# <  = Little Endian (Standard for ESP32/Jetson)
-# B = 1 byte (uint8)
-# b = 1 byte (int8)
-# H = 2 byte (uint16)
-# h = 2 byte (int16)
-# I = 4 byte (uint32)
-# i = 4 byte (int32)
-
-STRUCT_FORMAT = "<BHHHHHH" #13 BYTE
-PACKET_SIZE = struct.calcsize(STRUCT_FORMAT) # Should be 11 bytes
 #This Queue will hold the response forever til need
 incoming_mailbox = queue.Queue()
 
-
-# int value
-HEADER_1st = 0xAA       # 170
-HEADER_2st = 0X55       # 85
+# Initializ serial port
 ser = serial.Serial(port= "/dev/ttyUSB0", baudrate= 115200, timeout= 1)
-uart = UART(HEADER_1st, HEADER_2st, ser=ser)
+uart = UART(ser=ser)
 
 # --- Enum Mapping (For easy reading) ---
 REQUEST_TYPES = {
@@ -33,47 +18,20 @@ REQUEST_TYPES = {
     1: "RUN_SEQUENCE",
     2: "MOVE_XYZ",
     3: "CONTROL_GRIPPER",
-    4: "MOTION_COMPLETE" 
+    4: "SETUP_MATERIAL",
+    5: "HOMING",
+    6: "MOTION_COMPLETE" 
 }
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# This functions run in the background of the time
-def serial_listener():
-    while True:
-        try:
-            # Check if data exist
-            if ser.in_waiting > 0:
-                 if ser.read(1) == bytes([HEADER_1st]):
-                    print('header 1 ok')
-                    if ser.read(1) == bytes([HEADER_2st]): 
-                        print('header 2 ok')
-                        print(f"Waiting for packets (Size: {PACKET_SIZE} bytes)...")
-                        payload = ser.read(PACKET_SIZE)
-                        req_val, x_pos_mm, y_pos_mm, z_pos_mm, gripper, current_foil, current_bag = uart.get_data(payload, STRUCT_FORMAT, PACKET_SIZE)
-                        req_name = REQUEST_TYPES.get(req_val, "UNKNOWN")
-                        
-                        print("-" * 30)
-                        print(f"Request Type : {req_name} ({req_val})")
-                        print(f"X Position   : {x_pos_mm} mm")
-                        print(f"Y Position   : {y_pos_mm} mm")
-                        print(f"Z Position   : {z_pos_mm} mm")
-                        print(f"Current Gripper: {gripper} deg")
-                        print(f"Current Foils: {current_foil} pcs")
-                        print(f"Current Bags : {current_bag} pcs")
-                        # Put it Mailbox(Thread-safe)
-                        # This saves the data in RAM safely
-                        result = {"type": req_val, "x": x_pos_mm, "y": y_pos_mm, "z": z_pos_mm, "gripper": gripper,"foil": current_foil, "bag": current_bag}
-                        incoming_mailbox.put(result)
-                        
-                    else:
-                        print('ERROR: Incomplete packet received.')
-        except:
-            pass
-
-
 # Start the listener
-t1 = threading.Thread(target=serial_listener, daemon=True)
+t1 = threading.Thread(
+    target=uart.serial_listener,
+    args=(REQUEST_TYPES, incoming_mailbox),
+    daemon=True
+)
 t1.start()
+
 
 while True:
     print("\n" + str(REQUEST_TYPES))
@@ -93,8 +51,19 @@ while True:
         elif cmd == 3:
             uart.request_controll_gripper(request=cmd)
 
-        elif cmd == 4:
+        elif cmd == 4: #Package 27 Bytes
+            bags = [1, 2, 60, 30, 50, 30,]
+            foils = [2, 60, 3, 10, 10]
+            holder = [100, 60, 30]
+
+            uart.send_setup_cmd(bags, foils, holder)
+
+        elif cmd == 5:
+            uart.request_homing(request=cmd)
+
+        elif cmd == 6:
             continue
+
         else:
             print("\nInvalid command!\n")
 
@@ -120,6 +89,3 @@ try:
         print("Got some other msg")
 except queue.Empty:
     print("Timeout! Motor took too long or MCU is crashed")
-
-
-    
