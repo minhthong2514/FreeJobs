@@ -1,136 +1,37 @@
 import cv2
 import numpy as np
 
-H_data = np.load(
-    "/home/minhthong/Desktop/code/farmbot/calib-camera/Homoraphy_value.npz"
-)
-H = H_data["H"]
-params = np.load(
+Camera_params = np.load(
     "/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz"
 )
-K = params["K"]
-dist = params["dist"]
 
-origin_world = None        # (X0, Y0) in mm
-display_img = None         # image shown on screen
-base_img = None            # clean image for reset
+class Mapping:
+    def __init__(self):
+        self.H = Camera_params["H"]
+        self.K = Camera_params["K"]
+        self.dist = Camera_params["dist"]
 
-clicked_points = []
-# ==============================
-# Pixel -> World using Homography
-# ==============================
-def pixel_to_world(x, y, H):
-    """
-    Convert pixel coordinate (x, y)
-    to world coordinate (X, Y) in mm
-    using homography matrix H
-    """
-    p = np.array([x, y, 1.0])
-    P = H @ p
-    return P[0] / P[2], P[1] / P[2]
+        self.cam_gripper_mm = np.array([1.0, 1.0], dtype=np.float32)
 
-# ==============================
-# Mouse Callback
-# ==============================
-def mouse_callback(event, x, y, flags, param):
-    global origin_world, clicked_points
+        self.base_camera_mm = np.array([np.nan, np.nan], dtype=np.float32)
+        self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
 
-    if event != cv2.EVENT_LBUTTONDOWN:
-        return
+        # Optical center
+        self.cx = self.K[0, 2]  
+        self.cy = self.K[1, 2]  
+        p_center = np.array([self.cx, self.cy, 1.0], dtype=np.float32).reshape(3, 1)
+        P_center_mm = self.H @ p_center
+        self.center_mm = P_center_mm[:2, 0] / P_center_mm[2, 0]
+    
+    def pixel_to_world(self, u, v):
+        # Convert current point to mm
+        p = np.array([u, v, 1.0], dtype=np.float32)
+        P_mm = self.H @ p
+        P_mm = P_mm[:2] / P_mm[2]
 
-    X, Y = pixel_to_world(x, y, H)
-
-    # First click → set origin
-    if origin_world is None:
-        origin_world = (X, Y)
-
-        clicked_points.append({
-            "pixel": (x, y),
-            "world": (0.0, 0.0),
-            "is_origin": True
-        })
-
-        print(f"Origin set at: ({X:.2f}, {Y:.2f})mm")
-        return
-
-    # Other points
-    Xr = X - origin_world[0]
-    Yr = origin_world[1] - Y
-
-    clicked_points.append({
-        "pixel": (x, y),
-        "world": (Xr, Yr),
-        "is_origin": False
-    })
-
-    print(f"Pixel ({x},{y}) -> World ({Xr:.2f},{Yr:.2f})mm")
-
-    if event != cv2.EVENT_LBUTTONDOWN:
-        return
-
-    # Convert pixel to world coordinate
-    X, Y = pixel_to_world(x, y, H)
-
-    # ------------------------------
-    # First click: set origin
-    # ------------------------------
-    if origin_world is None:
-        origin_world = (X, Y)
-        print(f"Origin set at: ({X:.2f}, {Y:.2f})mm")
-
-        cv2.circle(display_img, (x, y), 6, (0, 255, 0), -1)
-        cv2.putText(
-            display_img,
-            "ORIGIN (0, 0) mm",
-            (x + 8, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2
-        )
-        return
-
-    # ------------------------------
-    # Other points: relative to origin
-    # ------------------------------
-    Xr = X - origin_world[0]
-    Yr = origin_world[1] - Y    # Cartesian coordinate (Y up)
-
-    cv2.circle(display_img, (x, y), 4, (0, 0, 255), -1)
-    cv2.putText(
-        display_img,
-        f"({Xr:.2f}, {Yr:.2f})mm",
-        (x + 8, y + 8),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 0, 255),
-        1
-    )
-
-def draw_points(img):
-    for pt in clicked_points:
-        x, y = pt["pixel"]
-        X, Y = pt["world"]
-
-        if pt["is_origin"]:
-            cv2.circle(img, (x, y), 6, (0, 255, 0), -1)
-            cv2.putText(
-                img,
-                "ORIGIN (0,0)mm",
-                (x + 8, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-        else:
-            cv2.circle(img, (x, y), 4, (0, 0, 255), -1)
-            cv2.putText(
-                img,
-                f"({X:.2f},{Y:.2f})mm",
-                (x + 8, y + 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 255),
-                1
-            )
+        relative_mm = P_mm - self.center_mm
+        
+        return relative_mm
+    
+    def return_cx_cy(self):
+        return self.cx, self.cy

@@ -2,15 +2,22 @@ import cv2
 import os
 
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
 if not cap.isOpened():
     print("Can't open the camera.")
     exit()
 
 path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/images"
 
-img_count = 1
-while os.path.exists(os.path.join(path, f"img-{img_count}.jpg")):
-    img_count += 1
+def get_next_available_index(folder_path):
+    index = 1
+    while True:
+        filename = f"img-{index}.jpg"
+        if not os.path.exists(os.path.join(folder_path, filename)):
+            return index
+        index += 1
 
 print("Press number 1 for shooting / press 'q' to exit.")
 
@@ -19,17 +26,16 @@ while True:
     if not ret:
         print("cannot receive frame from camera.")
         break
-
+    current_idx = get_next_available_index(path)
     cv2.imshow("Camera", frame)
     key = cv2.waitKey(1) & 0xFF
 
     if key == ord('1'):
-        filename = f"img-{img_count}.jpg"
+        filename = f"img-{current_idx}.jpg"
         img_path = os.path.join(path, filename)
         cv2.imwrite(img_path, frame)
         print(f"Save img at: {img_path}")
-        img_count += 1
-
+        
     elif key == ord('q'):
         print("Exit.")
         break

@@ -2,21 +2,16 @@ import cv2
 import numpy as np
 
 # ==============================
-# Load Homography
+# Load Camera params
 # ==============================
-H_data = np.load(
-    "/home/minhthong/Desktop/code/farmbot/calib-camera/Homoraphy_value.npz"
-)
-H = H_data["H"]
-
-# ==============================
-# Load Camera Calibration
-# ==============================
-params = np.load(
+Camera_params = np.load(
     "/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz"
 )
-K = params["K"]
-dist = params["dist"]
+H = Camera_params["H"]
+K = Camera_params["K"]
+newK = Camera_params["newK"]
+dist = Camera_params["dist"]
+
 
 # ==============================
 # Global Variables
@@ -29,11 +24,6 @@ base_img = None            # clean image for reset
 # Pixel -> World using Homography
 # ==============================
 def pixel_to_world(x, y, H):
-    """
-    Convert pixel coordinate (x, y)
-    to world coordinate (X, Y) in mm
-    using homography matrix H
-    """
     p = np.array([x, y, 1.0])
     P = H @ p
     return P[0] / P[2], P[1] / P[2]
@@ -44,80 +34,27 @@ def pixel_to_world(x, y, H):
 def mouse_callback(event, x, y, flags, param):
     global origin_world, clicked_points
 
-    if event != cv2.EVENT_LBUTTONDOWN:
-        return
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # Convert clicked pixel to world mm
+        X, Y = pixel_to_world(x, y, H)
 
-    X, Y = pixel_to_world(x, y, H)
-
-    # First click → set origin
-    if origin_world is None:
-        origin_world = (X, Y)
-
-        clicked_points.append({
-            "pixel": (x, y),
-            "world": (0.0, 0.0),
-            "is_origin": True
-        })
-
-        print(f"Origin set at: ({X:.2f}, {Y:.2f}) mm")
-        return
-
-    # Other points
-    Xr = X - origin_world[0]
-    Yr = origin_world[1] - Y
-
-    clicked_points.append({
-        "pixel": (x, y),
-        "world": (Xr, Yr),
-        "is_origin": False
-    })
-
-    print(f"Pixel ({x},{y}) -> World ({Xr:.2f},{Yr:.2f}) mm")
-
-    if event != cv2.EVENT_LBUTTONDOWN:
-        return
-
-    # Convert pixel to world coordinate
-    X, Y = pixel_to_world(x, y, H)
-
-    # ------------------------------
-    # First click: set origin
-    # ------------------------------
-    if origin_world is None:
-        origin_world = (X, Y)
-        print(f"Origin set at: ({X:.2f}, {Y:.2f}) mm")
-
-        cv2.circle(display_img, (x, y), 6, (0, 255, 0), -1)
-        cv2.putText(
-            display_img,
-            "ORIGIN (0, 0) mm",
-            (x + 8, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2
-        )
-        return
-
-    # ------------------------------
-    # Other points: relative to origin
-    # ------------------------------
-    Xr = X - origin_world[0]
-    Yr = origin_world[1] - Y    # Cartesian coordinate (Y up)
-
-    print(f"Pixel ({x}, {y}) -> World ({Xr:.2f}, {Yr:.2f}) mm")
-
-    cv2.circle(display_img, (x, y), 4, (0, 0, 255), -1)
-    cv2.putText(
-        display_img,
-        f"({Xr:.2f}, {Yr:.2f}) mm",
-        (x + 8, y + 8),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 0, 255),
-        1
-    )
-
+        if origin_world is None:
+            origin_world = (X, Y)
+            clicked_points.append({
+                "pixel": (x, y),
+                "world": (0.0, 0.0), # Origin is 0,0
+                "is_origin": True
+            })
+            print(f"Origin set at: ({X:.2f}, {Y:.2f}) mm")
+        else:
+            Xr = X - origin_world[0]
+            Yr = origin_world[1] - Y  
+            clicked_points.append({
+                "pixel": (x, y),
+                "world": (Xr, Yr),
+                "is_origin": False
+            })
+            print(f"Pixel ({x},{y}) -> World relative: ({Xr:.2f}, {Yr:.2f}) mm")
 def draw_points(img):
     for pt in clicked_points:
         x, y = pt["pixel"]
@@ -138,19 +75,20 @@ def draw_points(img):
             cv2.circle(img, (x, y), 4, (0, 0, 255), -1)
             cv2.putText(
                 img,
-                f"({X:.2f},{Y:.2f}) mm",
+                f"({X:.2f},{Y:.2f})mm",
                 (x + 8, y + 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.6,
                 (0, 0, 255),
-                1
+                2
             )
 
 # ==============================
 # Open Camera
 # ==============================
 cap = cv2.VideoCapture(0)   # change index if needed
-
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 if not cap.isOpened():
     print("Cannot open camera")
     exit()
@@ -166,22 +104,21 @@ while True:
     ret, frame = cap.read()
     if not ret:
         break
-    h, w = frame.shape[:2]
-    newK, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w,h), 1)
-    undistorted = cv2.undistort(frame, K, dist, None, newK)
 
-    display_img = undistorted.copy()
+    # 1. Undistort the live frame
+    undist_img = cv2.undistort(frame, K, dist, None, newK)
+    
+    # 2. Create a copy for display so we don't mess up the original coordinates
+    display_img = undist_img.copy()
 
-    # Draw all clicked points
+    # 3. Draw all stored points on the current frame
     draw_points(display_img)
 
     cv2.imshow("Pixel to World", display_img)
 
     key = cv2.waitKey(1) & 0xFF
-
     if key == ord('q'):
         break
-
     if key == ord('r'):
         origin_world = None
         clicked_points.clear()
