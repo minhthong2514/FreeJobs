@@ -39,12 +39,18 @@ while True:
 
     if cmd == "s":
         break
-    else:
+
+    if cmd == "":
+        continue
+
+    try:
         cmd = int(cmd)
         if cmd == 0:
             uart.request_ask_current_position(request=cmd)
+            
         elif cmd == 1:
             uart.request_run_sequence(request=cmd)
+            
         elif cmd == 2:
             uart.request_move_xyz(request=cmd) 
 
@@ -66,7 +72,9 @@ while True:
 
         else:
             print("\nInvalid command!\n")
-
+            
+    except ValueError:
+        print("\n[!] Please enter a valid number or 's'.")
 
     # time.sleep(1)
 
@@ -76,16 +84,18 @@ while True:
     # uart.send_data(4, 40, 30, 10, ser) # run sequency automatically
     # time.sleep(1)
 
+
+
 # Check the mailbox
 # block=True means "Wait here until a data arrives"
 # timeout=10 means "Wait 10 second, then give up"
 
-try:
-    response = incoming_mailbox.get(block=True, tineout=10)
+# try:
+#     response = incoming_mailbox.get(block=True, timeout=10)
 
-    if response['type'] == 4: # Assuing 5 is MOTION_COMPLETE
-        print(f"Success! Motor Finished at X: {response['x']}")
-    else:
-        print("Got some other msg")
-except queue.Empty:
-    print("Timeout! Motor took too long or MCU is crashed")
+#     if response['type'] == 4: # Assuing 5 is MOTION_COMPLETE
+#         print(f"Success! Motor Finished at X: {response['x']}")
+#     else:
+#         print("Got some other msg")
+# except queue.Empty:
+#     print("Timeout! Motor took too long or MCU is crashed")

@@ -14,6 +14,7 @@ The data frame is in the following format: [request, x_pos_mm, y_pos_mm, z_pos_m
 
 import struct
 import logging
+import time
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -25,12 +26,12 @@ class UART:
         self.ser = ser
         self.buffer = []
         self.request = None
-        self.x_pos_mm = 0
-        self.y_pos_mm = 0
-        self.z_pos_mm = 0
+        self.current_pos_x = 0
+        self.current_pos_y = 0
+        self.current_pos_z = 0
         self.gripper = 0
-        self.current_fols = 0
-        self.current_bag = 0
+        # self.current_fols = 0
+        # self.current_bag = 0
         self.axes = {"X": 0, "Y": 0, "Z": 0}
         self.STRUCT_FORMAT = "<BHHHH"     # frame must be little endian and 9 bytes.
         self.PACKET_SIZE = struct.calcsize(self.STRUCT_FORMAT)  # Should be 9 bytes
@@ -38,8 +39,8 @@ class UART:
     # This function is used for receiving data from MCU.
     def get_data(self, payload, struct_format, packet_size):                                    # payload is data read, struct_format is amount of bytes, packet_size is the quantity of packet
         if len(payload) == packet_size:                                                         # ckeck payload length is equal to packet size, 
-            request, x_pos_mm, y_pos_mm, z_pos_mm, gripper, current_fols, current_bag  = struct.unpack(struct_format, payload)       # unpacking the payload.
-            return request, x_pos_mm, y_pos_mm, z_pos_mm, gripper, current_fols, current_bag
+            request, current_pos_x, current_pos_y, current_pos_z, gripper = struct.unpack(struct_format, payload)       # unpacking the payload.
+            return request, current_pos_x, current_pos_y, current_pos_z, gripper
      
     # This function is used for sending data to MCU.
     def send_data(self, buffer):
@@ -91,8 +92,11 @@ class UART:
         return len(updated_axes)
     
     def request_ask_current_position(self, request):
-        frame = [request, self.axes["X"], self.axes["Y"], self.axes["Z"], self.gripper]
+        frame = [request, self.current_pos_x, self.current_pos_y, self.current_pos_z, self.gripper]
         self.send_data(frame)
+        print(f"\nSend data: {frame}\n")
+        return
+        
  
     def request_run_sequence(self, request):
         frame = [request, self.axes["X"], self.axes["Y"], self.axes["Z"], self.gripper]
@@ -158,37 +162,33 @@ class UART:
         self.ser.write(bytes([self.HEADER_2st]))
         self.ser.write(payload)
 
-    # This functions run in the background of the time
     def serial_listener(self, REQUEST_TYPES, incoming_mailbox):
         while True:
             try:
-                # Check if data exist
+                # Check if data exisr
                 if self.ser.in_waiting > 0:
                     if self.ser.read(1) == bytes([self.HEADER_1st]):
-                        print('header 1 ok')
                         if self.ser.read(1) == bytes([self.HEADER_2st]): 
-                            print('header 2 ok')
-                            print(f"Waiting for packets (Size: {self.PACKET_SIZE} bytes)...")
                             payload = self.ser.read(self.PACKET_SIZE)
-                            req_val, x_pos_mm, y_pos_mm, z_pos_mm, gripper, current_foil, current_bag = self.get_data(payload, self.STRUCT_FORMAT, self.PACKET_SIZE)
-                            req_name = REQUEST_TYPES.get(req_val, "UNKNOWN")
-                            
-                            print("-" * 30)
-                            print(f"Request Type : {req_name} ({req_val})")
-                            print(f"X Position   : {x_pos_mm} mm")
-                            print(f"Y Position   : {y_pos_mm} mm")
-                            print(f"Z Position   : {z_pos_mm} mm")
-                            print(f"Current Gripper: {gripper} deg")
-                            print(f"Current Foils: {current_foil} pcs")
-                            print(f"Current Bags : {current_bag} pcs")
-                            # Put it Mailbox(Thread-safe)
-                            # This saves the data in RAM safely
-                            result = {"type": req_val, "x": x_pos_mm, "y": y_pos_mm, "z": z_pos_mm, "gripper": gripper,"foil": current_foil, "bag": current_bag}
-                            incoming_mailbox.put(result)
-                            
-                        else:
-                            print('ERROR: Incomplete packet received.')
-            except:
-                pass
+                            if len(payload) == self.PACKET_SIZE:
+                                req_val, self.current_pos_x, self.current_pos_y, self.current_pos_z, self.gripper = self.get_data(payload, self.STRUCT_FORMAT, self.PACKET_SIZE)
+                                
+                                # Display current position on monitor
+                                print("\n--- RESPONSE FROM MCU ---")
+                                print(f"Type : {req_val}")
+                                print(f"X    : {self.current_pos_x} mm")
+                                print(f"Y    : {self.current_pos_y} mm")
+                                print(f"Z    : {self.current_pos_z} mm")
+                                print(f"Grip : {self.gripper} deg")
+                                print("\n" + str(REQUEST_TYPES), flush=True)
+                                print("\nCHOOSE REQUEST OR PRESS 's' TO STOP PROGRAM: ", end="")
+                                
+                                # Put it Mailbox(Thread-safe)
+                                # This saves the data in RAM safely
+                                result = {"type": req_val, "Current_X": self.current_pos_x, "Current_Y": self.current_pos_y, "Current_Z": self.current_pos_z, "gripper": self.gripper}
+                                incoming_mailbox.put_nowait(result)
+                time.sleep(0.01)
 
-        
+            except Exception as e:
+                print(f"Serial Error: {e}")
+                time.sleep(1)

@@ -7,14 +7,15 @@ Camera_params = np.load(
 
 class Mapping:
     def __init__(self):
+        # Load Camera parameters
         self.H = Camera_params["H"]
         self.K = Camera_params["K"]
+        self.newK = Camera_params["newK"]
         self.dist = Camera_params["dist"]
 
-        self.cam_gripper_mm = np.array([1.0, 1.0], dtype=np.float32)
-
-        self.base_camera_mm = np.array([np.nan, np.nan], dtype=np.float32)
-        self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
+        self.cam_gripper_mm = np.array([17.0, -24.25], dtype=np.float32)            # Offset camera to gripper
+        self.base_camera_mm = np.array([0.0, 0.0], dtype=np.float32)                # Current position of camera
+        self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)           # Distance between camera and bag
 
         # Optical center
         self.cx = self.K[0, 2]  
