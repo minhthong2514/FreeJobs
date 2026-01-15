@@ -4,6 +4,7 @@ from uart_protocol import UART
 import logging
 import threading
 import queue
+from camera import Mapping, CameraDetect
 
 #This Queue will hold the response forever til need
 incoming_mailbox = queue.Queue()
@@ -11,6 +12,21 @@ incoming_mailbox = queue.Queue()
 # Initializ serial port
 ser = serial.Serial(port= "/dev/ttyUSB0", baudrate= 115200, timeout= 1)
 uart = UART(ser=ser)
+
+# Init Mapping
+mapping = Mapping()
+ONNX_MODEL_PATH = "/home/minhthong/Desktop/code/farmbot/src/traffic_sign_model.onnx"
+
+# Init camera thread
+camera = CameraDetect(
+    model_onnx_path=ONNX_MODEL_PATH,
+    mapping=mapping,
+    enable_display=True
+)
+
+# Start threads
+camera.start()          # detect thread
+camera.start_display()  # display thread
 
 # --- Enum Mapping (For easy reading) ---
 REQUEST_TYPES = {
@@ -31,7 +47,6 @@ t1 = threading.Thread(
     daemon=True
 )
 t1.start()
-
 
 while True:
     print("\n" + str(REQUEST_TYPES))

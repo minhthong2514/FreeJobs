@@ -148,6 +148,7 @@ class UART:
                     continue
 
     def request_homing(self, request):
+            self.axes = {"X": 0, "Y": 0, "Z": 0}
             frame = [request, self.axes["X"], self.axes["Y"], self.axes["Z"], self.gripper]
             self.send_data(frame)
             print(f"\nSend data: {frame}\n")
