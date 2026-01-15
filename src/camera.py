@@ -76,11 +76,6 @@ class Mapping:
 # Camera detection thread (vision only)
 # ===================================
 class CameraDetect(threading.Thread):
-    """
-    Thread 1: Capture + detect + update mapping
-    Thread 2: Display frames
-    """
-
     def __init__(self, model_onnx_path, mapping, enable_display=True):
         super().__init__(daemon=True)
 
@@ -291,15 +286,25 @@ class CameraDetect(threading.Thread):
             # cam_bag_mm_y = self.camera_bag_mm[1]
 
             label = self.classes[class_ids[i]]
-
+            final_position = self.mapping.compute_final_base_position()
+            if final_position is not None:
+               cv2.putText(
+                draw,
+                f"Final: X={final_position[0]:.1f}, Y={final_position[1]:.1f} mm",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            ) 
             # Update mapping (example: stop = bag)
             if label == "stop":
                 self.mapping.update_bag_from_pixel(u, v)
             camera_bag_mm = self.mapping.get_camera_bag_mm()
-
             cv2.rectangle(draw, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)
             cv2.putText(draw, label, (x, y - 5),cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
             cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255,0,0), -1)
             cv2.line(draw, (int(self.cx), int(self.cy)), (u,v), (0,255,255), 2)
             cv2.putText(draw, f"({camera_bag_mm[0]:.2f}, {camera_bag_mm[1]:.2f})mm",

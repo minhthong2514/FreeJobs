@@ -48,6 +48,8 @@ t1 = threading.Thread(
 )
 t1.start()
 
+waiting_for_base_camera = False
+
 while True:
     print("\n" + str(REQUEST_TYPES))
     cmd = input("\nCHOOSE REQUEST OR PRESS 's' TO STOP PROGRAM: ").lower()
@@ -62,7 +64,8 @@ while True:
         cmd = int(cmd)
         if cmd == 0:
             uart.request_ask_current_position(request=cmd)
-            
+            waiting_for_base_camera = True
+
         elif cmd == 1:
             uart.request_run_sequence(request=cmd)
             
@@ -91,6 +94,22 @@ while True:
     except ValueError:
         print("\n[!] Please enter a valid number or 's'.")
 
+    # ---------- HANDLE RESPONSE FROM ESP ----------
+    try:
+        result = incoming_mailbox.get_nowait()
+
+        # Nếu đang chờ mode 0 → update base_camera
+        if waiting_for_base_camera:
+            x = result["Current_X"]
+            y = result["Current_Y"]
+
+            mapping.update_base_camera_position(x, y)
+            waiting_for_base_camera = False
+
+            print(f"[Mapping] Base camera updated: X={x} mm, Y={y} mm")
+
+    except queue.Empty:
+        pass
     # time.sleep(1)
 
     # uart.send_data(4, 40, 30, 0, ser) # run sequency automatically
