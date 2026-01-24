@@ -20,10 +20,11 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 class UART:
     # The first is initialized the params.
-    def __init__(self, ser):
+    def __init__(self, ser, incoming_mailbox):
         self.HEADER_1st = 0xAA          # 170
         self.HEADER_2st = 0x55          # 85
         self.ser = ser
+        self.incoming_mailbox = incoming_mailbox
         self.buffer = []
         self.request = None
         self.current_pos_x = 0
@@ -193,3 +194,40 @@ class UART:
             except Exception as e:
                 print(f"Serial Error: {e}")
                 time.sleep(1)
+
+    # def moving(self, request):
+    #     frame = [
+    #             request,
+    #             self.axes["X"],
+    #             self.axes["Y"],
+    #             self.axes["Z"],
+    #             self.gripper
+    #         ]
+
+    #     self.send_data(frame)
+    #     time.sleep(3)
+        
+    #     wp_x = 80
+    #     wp_y = 60
+    #     step = 10
+
+    #     dir_x = 1  # 1: turn right, -1: turn left
+
+    #     while True:
+    #         if self.axes["Y"] >= wp_y:
+    #             if (dir_x == 1 and self.axes["X"] >= wp_x) or (dir_x == -1 and self.axes["X"] <= 0):
+    #                 return
+    #                 # break 
+
+    #         # Move X
+    #         self.axes["X"] += dir_x * step
+
+    #         if self.axes["X"] > wp_x:
+    #             self.axes["X"] = wp_x
+    #             self.axes["Y"] += step
+    #             dir_x = -1
+    #         elif self.axes["X"] < 0:
+    #             self.axes["X"] = 0
+    #             self.axes["Y"] += step
+    #             dir_x = 1
+            

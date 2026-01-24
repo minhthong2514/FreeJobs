@@ -3,7 +3,7 @@ import numpy as np
 import threading
 import onnxruntime as ort
 import time
-
+import queue
 # Load calibration data
 Camera_params = np.load(
     "/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz"
@@ -13,7 +13,12 @@ Camera_params = np.load(
 # Mapping class (math only)
 # =========================
 class Mapping:
-    def __init__(self):
+    def __init__(self, uart):
+        self.uart = uart
+        self.wp_x, self.wp_y = np.array([40, 80], dtype=np.int32)
+        self.step_move = 20
+        self.dir_move = 1
+        self.positions_lst = []
         # Homography and intrinsic matrix
         self.H = Camera_params["H"]
         self.K = Camera_params["K"]
@@ -61,17 +66,66 @@ class Mapping:
     def compute_final_base_position(self):
         # Compute final gripper position in base frame
         with self.lock:
-            if self.camera_bag_mm is None:
+            if (self.camera_bag_mm is None or np.isnan(self.camera_bag_mm).any() or np.isnan(self.base_camera_mm).any()):
                 return None
 
             bag_base_mm = self.base_camera_mm + self.camera_bag_mm
             final_position = bag_base_mm - self.camera_gripper_mm
-            return final_position
+            return np.floor(final_position + 0.5).astype(int)
 
     def get_camera_bag_mm(self):
         with self.lock:
-            return self.camera_bag_mm.copy()
+            return self.camera_bag_mm.copy()        
 
+    def moving(self, request):
+        while True:
+            waiting_for_base_camera = True
+            frame = [
+                request,
+                self.uart.axes["X"],
+                self.uart.axes["Y"],
+                self.uart.axes["Z"],
+                self.uart.gripper
+            ]
+
+            self.uart.send_data(frame)
+            time.sleep(0.5)
+            self.uart.request_ask_current_position(request=0)
+            try:
+                result = self.uart.incoming_mailbox.get()
+                if waiting_for_base_camera and result["type"] == 6:
+                    current_x = result["Current_X"]
+                    current_y = result["Current_Y"]
+                    self.update_base_camera_position(current_x, current_y)
+                    waiting_for_base_camera = False
+                    final_position = self.compute_final_base_position()
+                    if final_position is not None:
+                        self.positions_lst.append(final_position)
+                print(f"\nPhản hồi nhận được: X={current_x}, Y={current_y}")
+                
+                time.sleep(2)
+            except queue.Empty:
+                print("Lỗi: Không nhận được phản hồi từ Robot!")
+
+
+            if self.uart.axes["Y"] >= self.wp_y:
+                if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
+                    print(f"\nList postions of object: {self.positions_lst}")
+                    return
+                    # break 
+
+            # Move X
+            self.uart.axes["X"] += self.dir_move * self.step_move
+
+            if self.uart.axes["X"] > self.wp_x:
+                self.uart.axes["X"] = self.wp_x
+                self.uart.axes["Y"] += self.step_move
+                self.dir_move = -1
+            elif self.uart.axes["X"] < 0:
+                self.uart.axes["X"] = 0
+                self.uart.axes["Y"] += self.step_move
+                self.dir_move = 1
+            
 # ===================================
 # Camera detection thread (vision only)
 # ===================================
@@ -93,7 +147,7 @@ class CameraDetect(threading.Thread):
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
         self.IOU_THRESH = 0.45
-        self.CONF_THRESH = 0.9
+        self.CONF_THRESH = 0.95
         self.classes = ['go-ahead', 'stop', 'turn-around', 'turn-left', 'turn-right']
 
         # ---------------- Camera calibration ----------------
@@ -290,7 +344,7 @@ class CameraDetect(threading.Thread):
             if final_position is not None:
                cv2.putText(
                 draw,
-                f"Final: X={final_position[0]:.1f}, Y={final_position[1]:.1f} mm",
+                f"Final: X={final_position[0]}, Y={final_position[1]} mm",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,

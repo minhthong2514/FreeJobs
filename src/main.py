@@ -10,11 +10,11 @@ from camera import Mapping, CameraDetect
 incoming_mailbox = queue.Queue()
 
 # Initializ serial port
-ser = serial.Serial(port= "/dev/ttyUSB0", baudrate= 115200, timeout= 1)
-uart = UART(ser=ser)
+ser = serial.Serial(port= "/dev/ttyUSB0", baudrate= 115200, timeout=1)
+uart = UART(ser=ser, incoming_mailbox=incoming_mailbox)
 
 # Init Mapping
-mapping = Mapping()
+mapping = Mapping(uart=uart)
 ONNX_MODEL_PATH = "/home/minhthong/Desktop/code/farmbot/src/traffic_sign_model.onnx"
 
 # Init camera thread
@@ -36,7 +36,8 @@ REQUEST_TYPES = {
     3: "CONTROL_GRIPPER",
     4: "SETUP_MATERIAL",
     5: "HOMING",
-    6: "MOTION_COMPLETE" 
+    6: "MOTION_COMPLETE",
+    7: "MAPPING"
 }
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -99,7 +100,8 @@ while True:
 
         elif cmd == 6:
             continue
-
+        elif cmd == 7:
+            mapping.moving(request=2)
         else:
             print("\nInvalid command!\n")
             
