@@ -72,6 +72,13 @@ class Mapping:
 
             bag_base_mm = self.base_camera_mm + self.camera_bag_mm
             final_position = bag_base_mm - self.camera_gripper_mm
+            
+            # SAFETY BOUNDARY CHECK            
+            target_x = final_position[0]
+            if target_x < 0:
+                return None # Unreachable on the left
+            if target_x > self.wp_x:
+                return None
             return final_position
 
     def get_camera_bag_mm(self):
@@ -96,6 +103,7 @@ class Mapping:
             try:
                 result = self.uart.incoming_mailbox.get()
                 if waiting_for_base_camera and result["type"] == 6:
+                    time.sleep(2)
                     current_x = result["Current_X"]
                     current_y = result["Current_Y"]
                     self.update_base_camera_position(current_x, current_y)
@@ -106,14 +114,14 @@ class Mapping:
 
                 print(f"\nPhản hồi nhận được: X={current_x}, Y={current_y}")
                 
-                time.sleep(1)
+                
             except queue.Empty:
                 print("Lỗi: Không nhận được phản hồi từ Robot!")
 
 
             if self.uart.axes["Y"] >= self.wp_y:
                 if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-                    # print(f"\nList postions of object: {positions_lst}")
+                    print(f"\nList postions of object: {positions_lst}")
                     return positions_lst
                     # break 
 
@@ -225,8 +233,6 @@ class Mapping:
         return np.floor(np.array(final_positions) + 0.5).astype(int).tolist()
         
     def mapping(self):
-        print("\n[MAPPING] Starting scanning process...")
-
         # Reset coordinate to NaN before starting a new scan
         with self.lock:
             self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
@@ -236,6 +242,8 @@ class Mapping:
         except ValueError:
             print("Invalid input! Please enter an integer.")
             self.numbers_of_bag = 0
+        
+        print("\n[MAPPING] Starting scanning process...")
 
         if self.numbers_of_bag != 0:
             # Step 1: Execute the movement and collect raw points
@@ -484,18 +492,8 @@ class CameraDetect(threading.Thread):
             # cam_bag_mm_y = self.camera_bag_mm[1]
 
             label = self.classes[class_ids[i]]
-            # final_position = self.mapping.compute_final_base_position()
 
-            # if final_position is not None:
-            #    cv2.putText(
-            #     draw,
-            #     f"Final: X={final_position[0]:.2f}, Y={final_position[1]:.2f} mm",
-            #     (10, 30),
-            #     cv2.FONT_HERSHEY_SIMPLEX,
-            #     0.7,
-            #     (0, 0, 255),
-            #     2
-            # ) 
+            
             # Update mapping (example: stop = bag)
             color_box = (0, 255, 0)
             if label == "stop":
@@ -504,7 +502,18 @@ class CameraDetect(threading.Thread):
                     is_real_bbox = True
 
                     camera_bag_mm = self.mapping.get_camera_bag_mm()
+                    final_position = self.mapping.compute_final_base_position()
 
+                    if final_position is not None:
+                        cv2.putText(
+                            draw,
+                            f"Final: X={final_position[0]:.2f}, Y={final_position[1]:.2f} mm",
+                            (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 0, 255),
+                            2
+                        ) 
                     cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)
                     cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255,0,0), -1)
                     cv2.line(draw, (int(self.cx), int(self.cy)), (u,v), (0,255,255), 2)
