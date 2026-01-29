@@ -15,10 +15,11 @@ Camera_params = np.load(
 class Mapping:
     def __init__(self, uart):
         self.uart = uart
-        self.wp_x, self.wp_y = np.array([40, 80], dtype=np.int32)
+        self.wp_x, self.wp_y = np.array([60, 80], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
-        self.positions_lst = []
+        self.numbers_of_bag = 0
+        # self.positions_lst = []
         # Homography and intrinsic matrix
         self.H = Camera_params["H"]
         self.K = Camera_params["K"]
@@ -71,13 +72,14 @@ class Mapping:
 
             bag_base_mm = self.base_camera_mm + self.camera_bag_mm
             final_position = bag_base_mm - self.camera_gripper_mm
-            return np.floor(final_position + 0.5).astype(int)
+            return final_position
 
     def get_camera_bag_mm(self):
         with self.lock:
             return self.camera_bag_mm.copy()        
-
-    def moving(self, request):
+    
+    def moving(self, request=2):
+        positions_lst = []
         while True:
             waiting_for_base_camera = True
             frame = [
@@ -100,18 +102,19 @@ class Mapping:
                     waiting_for_base_camera = False
                     final_position = self.compute_final_base_position()
                     if final_position is not None:
-                        self.positions_lst.append(final_position)
+                        positions_lst.append(final_position)
+
                 print(f"\nPhản hồi nhận được: X={current_x}, Y={current_y}")
                 
-                time.sleep(2)
+                time.sleep(1)
             except queue.Empty:
                 print("Lỗi: Không nhận được phản hồi từ Robot!")
 
 
             if self.uart.axes["Y"] >= self.wp_y:
                 if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-                    print(f"\nList postions of object: {self.positions_lst}")
-                    return
+                    # print(f"\nList postions of object: {positions_lst}")
+                    return positions_lst
                     # break 
 
             # Move X
@@ -120,11 +123,133 @@ class Mapping:
             if self.uart.axes["X"] > self.wp_x:
                 self.uart.axes["X"] = self.wp_x
                 self.uart.axes["Y"] += self.step_move
-                self.dir_move = -1
+                self.dir_move = -1                                                                                                                                                                                                                                                  
             elif self.uart.axes["X"] < 0:
                 self.uart.axes["X"] = 0
                 self.uart.axes["Y"] += self.step_move
                 self.dir_move = 1
+            time.sleep(0.1)
+
+    def process_noise_positions(self, raw_list):
+        # Convert the Python List to a Numpy Array before processing
+        if not raw_list:
+            print("Error: No positions were collected!")
+            return []
+            
+        position_lst = np.array(raw_list) 
+
+        # Now this line will work perfectly
+        position_lst_sorted = position_lst[position_lst[:, 0].argsort()]
+
+        # --- STEP 1: Preliminary Clustering (Absolute threshold for X and Y) ---
+        pre_clusters = []
+        threshold_val = 2.0  # 2mm Threshold
+
+        if len(position_lst_sorted) > 0:
+            curr_group = [position_lst_sorted[0]]
+        
+            for i in range(1, len(position_lst_sorted)):
+                prev_point = curr_group[-1]
+                curr_point = position_lst_sorted[i]
+            
+                # Check thresholds for both X and Y axes
+                # Join group if both X and Y distances are within 2mm
+                if abs(curr_point[0] - prev_point[0]) <= threshold_val and \
+                abs(curr_point[1] - prev_point[1]) <= threshold_val:
+                    curr_group.append(curr_point)
+                else:
+                    pre_clusters.append(np.array(curr_group))
+                    curr_group = [curr_point]
+                
+            pre_clusters.append(np.array(curr_group))
+
+        # --- STEP 2: Fine Filtering around Centroid ---
+        final_clusters = []
+        for cluster in pre_clusters:
+            center = np.mean(cluster, axis=0)
+        
+            # Filter: Points must stay within (Centroid ± Threshold) for both X and Y
+            refined_group = cluster[
+                (np.abs(cluster[:, 0] - center[0]) <= threshold_val) &
+                (np.abs(cluster[:, 1] - center[1]) <= threshold_val)
+            ]
+        
+            if len(refined_group) > 0:
+                final_clusters.append(refined_group)
+
+        # --- STEP 3: Sort clusters by size (Descending: Highest point count first) ---
+        sorted_clusters = sorted(final_clusters, key=len, reverse=True)
+
+        # --- STEP 4: Select n + 1 groups for analysis ---
+        num_to_keep = self.numbers_of_bag + 1
+        final_selection = sorted_clusters[:num_to_keep]
+
+        # --- STEP 5: Delta Logic and Coordinate Extraction ---
+        should_remap = False
+        final_positions = []
+        warning_msg = ""
+
+        if len(sorted_clusters) >= self.numbers_of_bag:
+            if len(sorted_clusters) > self.numbers_of_bag:
+                count_n = len(sorted_clusters[self.numbers_of_bag-1])      # Last valid object count
+                count_n_plus_1 = len(sorted_clusters[self.numbers_of_bag]) # First noise/suspected count
+                delta = count_n - count_n_plus_1
+            
+                if delta < 1:
+                    should_remap = True
+                    warning_msg = f"WARNING: Low Delta ({delta}). Group {self.numbers_of_bag+1} is too similar to actual objects!"
+                else:
+                    warning_msg = f"SAFE: Valid Delta ({delta})."
+            else:
+                warning_msg = "SAFE: No significant noise detected."
+
+            if not should_remap:
+                for i in range(self.numbers_of_bag):
+                    avg_pos = np.mean(sorted_clusters[i], axis=0)
+                    final_positions.append(np.round(avg_pos, 2).tolist())
+        else:
+            warning_msg = "ERROR: Failed to find the required number of clusters."
+
+        # --- DEBUG & RESULTS ---
+        print(f"\n--- 2D SYSTEM ANALYSIS (n={self.numbers_of_bag}) ---")
+        for i, g in enumerate(final_selection):
+            label = "[VALID OBJECT]" if i < self.numbers_of_bag else "[SUSPECTED NOISE]"
+            print(f"Rank {i+1} {label}: {len(g)} points | Centroid: {np.round(np.mean(g, axis=0), 1)}")
+
+        print("-" * 50)
+        if should_remap:
+            print(f"CONCLUSION: {warning_msg} -> RE-MAPPING REQUIRED!")
+            return []
+        print(f"CONCLUSION: {warning_msg} -> Ready.")
+            
+        return np.floor(np.array(final_positions) + 0.5).astype(int).tolist()
+        
+    def mapping(self):
+        print("\n[MAPPING] Starting scanning process...")
+
+        # Reset coordinate to NaN before starting a new scan
+        with self.lock:
+            self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
+
+        try:
+            self.numbers_of_bag = int(input("Enter the actual number of bags (n): "))
+        except ValueError:
+            print("Invalid input! Please enter an integer.")
+            self.numbers_of_bag = 0
+
+        if self.numbers_of_bag != 0:
+            # Step 1: Execute the movement and collect raw points
+            raw_list = self.moving()
+            
+            if not raw_list:
+                print("[MAPPING] Error: No data collected during scan.")
+                return []
+
+            # Step 2: Pass raw data to processing logic
+            print("[MAPPING] Scanning finished. Analyzing data...")
+            final_coords = self.process_noise_positions(raw_list)
+            print(f"Final position is: {final_coords}")
+            return final_coords
             
 # ===================================
 # Camera detection thread (vision only)
@@ -147,7 +272,7 @@ class CameraDetect(threading.Thread):
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
         self.IOU_THRESH = 0.45
-        self.CONF_THRESH = 0.95
+        self.CONF_THRESH = 0.9
         self.classes = ['go-ahead', 'stop', 'turn-around', 'turn-left', 'turn-right']
 
         # ---------------- Camera calibration ----------------
@@ -299,6 +424,23 @@ class CameraDetect(threading.Thread):
 
         return keep
 
+    def is_real_bbox(self, x, y, w, h, frame_w=640, frame_h=480, margin=15):
+
+        # Calculate max boundaries
+        x_min = x
+        y_min = y
+        x_max = x + w
+        y_max = y + h
+        
+        # Check if any side is within the margin of the frame edges
+        if (x_min <= margin or 
+            y_min <= margin or 
+            x_max >= (frame_w - margin) or 
+            y_max >= (frame_h - margin)):
+            return False # Touching edge (Unsafe)
+            
+        return True # Inside safe zone
+
     def infer_and_detect(self, frame):
         img_input, scale, pad_x, pad_y = self.preprocess(frame)
         outputs = self.model.run(None, {self.input_name: img_input})
@@ -330,6 +472,8 @@ class CameraDetect(threading.Thread):
 
         idxs = self.nms(boxes, scores)
         draw = frame.copy()
+        h_frame, w_frame = frame.shape[:2]
+        is_real_bbox = False
 
         for i in idxs:
             x, y, w, h = boxes[i]
@@ -340,27 +484,40 @@ class CameraDetect(threading.Thread):
             # cam_bag_mm_y = self.camera_bag_mm[1]
 
             label = self.classes[class_ids[i]]
-            final_position = self.mapping.compute_final_base_position()
-            if final_position is not None:
-               cv2.putText(
-                draw,
-                f"Final: X={final_position[0]}, Y={final_position[1]} mm",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
-            ) 
+            # final_position = self.mapping.compute_final_base_position()
+
+            # if final_position is not None:
+            #    cv2.putText(
+            #     draw,
+            #     f"Final: X={final_position[0]:.2f}, Y={final_position[1]:.2f} mm",
+            #     (10, 30),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.7,
+            #     (0, 0, 255),
+            #     2
+            # ) 
             # Update mapping (example: stop = bag)
+            color_box = (0, 255, 0)
             if label == "stop":
-                self.mapping.update_bag_from_pixel(u, v)
-            camera_bag_mm = self.mapping.get_camera_bag_mm()
-            cv2.rectangle(draw, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)
-            cv2.putText(draw, label, (x, y - 5),cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
-            cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255,0,0), -1)
-            cv2.line(draw, (int(self.cx), int(self.cy)), (u,v), (0,255,255), 2)
-            cv2.putText(draw, f"({camera_bag_mm[0]:.2f}, {camera_bag_mm[1]:.2f})mm",
+                if self.is_real_bbox(x, y, w, h, w_frame, h_frame):
+                    self.mapping.update_bag_from_pixel(u, v)
+                    is_real_bbox = True
+
+                    camera_bag_mm = self.mapping.get_camera_bag_mm()
+
+                    cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)
+                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255,0,0), -1)
+                    cv2.line(draw, (int(self.cx), int(self.cy)), (u,v), (0,255,255), 2)
+                    cv2.putText(draw, f"({camera_bag_mm[0]:.2f}, {camera_bag_mm[1]:.2f})mm",
                     (u+8,v+8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+                else:
+                    color_box = (0, 0, 255)
+                    
+            cv2.rectangle(draw, (x, y), (x + w, y + h), color_box, 2)
+            cv2.putText(draw, label, (x, y - 5),cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if not is_real_bbox:
+            with self.mapping.lock:
+                self.mapping.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
+        
         return draw

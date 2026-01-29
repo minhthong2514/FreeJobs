@@ -101,7 +101,7 @@ while True:
         elif cmd == 6:
             continue
         elif cmd == 7:
-            mapping.moving(request=2)
+            mapping.mapping()
         else:
             print("\nInvalid command!\n")
             
