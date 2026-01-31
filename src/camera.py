@@ -15,11 +15,11 @@ Camera_params = np.load(
 class Mapping:
     def __init__(self, uart):
         self.uart = uart
-        self.wp_x, self.wp_y = np.array([60, 80], dtype=np.int32)
+        self.wp_x, self.wp_y = np.array([160, 80], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
         self.numbers_of_bag = 0
-        # self.positions_lst = []
+        self.final_positions_lst = []
         # Homography and intrinsic matrix
         self.H = Camera_params["H"]
         self.K = Camera_params["K"]
@@ -86,7 +86,7 @@ class Mapping:
             return self.camera_bag_mm.copy()        
     
     def moving(self, request=2):
-        positions_lst = []
+        raw_positions_lst = []
         while True:
             waiting_for_base_camera = True
             frame = [
@@ -98,19 +98,19 @@ class Mapping:
             ]
 
             self.uart.send_data(frame)
-            time.sleep(0.5)
+            time.sleep(0.1)
             self.uart.request_ask_current_position(request=0)
             try:
                 result = self.uart.incoming_mailbox.get()
                 if waiting_for_base_camera and result["type"] == 6:
-                    time.sleep(2)
+                    time.sleep(1)               # Time for updating current position
                     current_x = result["Current_X"]
                     current_y = result["Current_Y"]
                     self.update_base_camera_position(current_x, current_y)
                     waiting_for_base_camera = False
-                    final_position = self.compute_final_base_position()
-                    if final_position is not None:
-                        positions_lst.append(final_position)
+                    raw_final_position = self.compute_final_base_position()
+                    if raw_final_position is not None:
+                        raw_positions_lst.append(raw_final_position)
 
                 print(f"\nPhản hồi nhận được: X={current_x}, Y={current_y}")
                 
@@ -121,8 +121,8 @@ class Mapping:
 
             if self.uart.axes["Y"] >= self.wp_y:
                 if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-                    print(f"\nList postions of object: {positions_lst}")
-                    return positions_lst
+                    print(f"\nList postions of object: {raw_positions_lst}")
+                    return raw_positions_lst
                     # break 
 
             # Move X
@@ -138,7 +138,7 @@ class Mapping:
                 self.dir_move = 1
             time.sleep(0.1)
 
-    def process_noise_positions(self, raw_list):
+    def filtering_positions_lst(self, raw_list):
         # Convert the Python List to a Numpy Array before processing
         if not raw_list:
             print("Error: No positions were collected!")
@@ -233,6 +233,9 @@ class Mapping:
         return np.floor(np.array(final_positions) + 0.5).astype(int).tolist()
         
     def mapping(self):
+        # Reset final positions list for mapping
+        self.final_positions_lst = []
+
         # Reset coordinate to NaN before starting a new scan
         with self.lock:
             self.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
@@ -243,7 +246,29 @@ class Mapping:
             print("Invalid input! Please enter an integer.")
             self.numbers_of_bag = 0
         
-        print("\n[MAPPING] Starting scanning process...")
+        # # Request homing before mapping
+        # self.uart.request_homing(request=5)
+        # homing_flag = False
+        # print("\nRobot is homing...")
+
+        # # Start homing
+        # while not homing_flag:
+        #     try:
+        #         result = self.uart.incoming_mailbox.get()
+
+        #         if result["type"] == 6:
+        #             print("Homing is done!")
+
+        #             # Update current position
+        #             self.uart.axes["X"] = result["Current_X"]
+        #             self.uart.axes["Y"] = result["Current_Y"]
+        #             homing_flag = True
+        #     except queue.Empty:
+        #         print("[HOMING] Error!")
+        #         return []
+        
+        # time.sleep(1)
+        # print("\n[MAPPING] Starting scanning process...")
 
         if self.numbers_of_bag != 0:
             # Step 1: Execute the movement and collect raw points
@@ -255,10 +280,61 @@ class Mapping:
 
             # Step 2: Pass raw data to processing logic
             print("[MAPPING] Scanning finished. Analyzing data...")
-            final_coords = self.process_noise_positions(raw_list)
-            print(f"Final position is: {final_coords}")
-            return final_coords
+            self.final_positions_lst = self.filtering_positions_lst(raw_list)
+            print(f"Final position is: {self.final_positions_lst}")
+    
+    def run(self, request=2):
+        if len(self.final_positions_lst) == 0:
+            print("RE-Mapping, pls!")
+            return
+        # print(self.final_positions_lst)
+        for pos in self.final_positions_lst:
+            self.uart.axes["X"] = pos[0]
+            self.uart.axes["Y"] = pos[1]
+            self.uart.axes["Z"] = 0 
+
+            print(f"Moving to object at: X={self.uart.axes['X']}, Y={self.uart.axes['Y']}")
+            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
             
+            # Moving to position of object
+            self.uart.send_data(frame)  
+            # Asking MCU for sending current position
+            self.uart.request_ask_current_position(request=0)        
+
+            arrival_flag = False
+            while not arrival_flag:
+                try:
+                    result = self.uart.incoming_mailbox.get()
+                    if result["type"] == 6:
+                        dist_x = abs(result["Current_X"] - self.uart.axes["X"])
+                        dist_y = abs(result["Current_Y"] - self.uart.axes["Y"])
+                        print(dist_x)
+                        print(dist_y)
+                        if dist_x < 1.0 and dist_y < 1.0:
+                            print(f"Robot arrived at target!")
+                            arrival_flag = True
+                except queue.Empty:
+                    self.uart.send_data(frame)
+
+            time.sleep(0.5)
+
+            # Move gripper DOWN
+            self.uart.axes["Z"] = 50
+            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+            self.uart.send_data(frame)
+            time.sleep(3)
+
+            # self.uart.gripper = 1
+            # self.uart.send_data(frame)
+            # time.sleep(1)
+
+            # Move gripper UP
+            self.uart.axes["Z"] = 0
+            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+            self.uart.send_data(frame)
+
+            time.sleep(3)
+
 # ===================================
 # Camera detection thread (vision only)
 # ===================================
@@ -346,9 +422,7 @@ class CameraDetect(threading.Thread):
                 continue
 
             # Undistort
-            frame = cv2.undistort(
-                frame, self.K, self.dist, None, self.newK
-            )
+            frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
 
             # Detect
             draw = self.infer_and_detect(frame)
@@ -511,7 +585,7 @@ class CameraDetect(threading.Thread):
                             (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.7,
-                            (0, 0, 255),
+                            (0, 255, 255),
                             2
                         ) 
                     cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)

@@ -37,7 +37,8 @@ REQUEST_TYPES = {
     4: "SETUP_MATERIAL",
     5: "HOMING",
     6: "MOTION_COMPLETE",
-    7: "MAPPING"
+    7: "MAPPING",
+    8: "RUN"
 }
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -102,6 +103,8 @@ while True:
             continue
         elif cmd == 7:
             mapping.mapping()
+        elif cmd == 8:
+            mapping.run()
         else:
             print("\nInvalid command!\n")
             
