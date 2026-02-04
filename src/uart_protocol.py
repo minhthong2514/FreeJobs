@@ -95,7 +95,7 @@ class UART:
     def request_ask_current_position(self, request):
         frame = [request, self.current_pos_x, self.current_pos_y, self.current_pos_z, self.gripper]
         self.send_data(frame)
-        print(f"\nSend data: {frame}\n")
+        # print(f"\nSend data: {frame}\n")
         return
         
  
@@ -167,67 +167,37 @@ class UART:
     def serial_listener(self, REQUEST_TYPES, incoming_mailbox):
         while True:
             try:
-                # Check if data exisr
+                # Check if data exists
                 if self.ser.in_waiting > 0:
                     if self.ser.read(1) == bytes([self.HEADER_1st]):
                         if self.ser.read(1) == bytes([self.HEADER_2st]): 
                             payload = self.ser.read(self.PACKET_SIZE)
                             if len(payload) == self.PACKET_SIZE:
+                                # Update directly to class attributes as requested
                                 req_val, self.current_pos_x, self.current_pos_y, self.current_pos_z, self.gripper = self.get_data(payload, self.STRUCT_FORMAT, self.PACKET_SIZE)
-                                
-                                # Display current position on monitor
-                                print("\n--- RESPONSE FROM MCU ---")
-                                print(f"Type : {req_val}")
-                                print(f"X    : {self.current_pos_x} mm")
-                                print(f"Y    : {self.current_pos_y} mm")
-                                print(f"Z    : {self.current_pos_z} mm")
-                                print(f"Grip : {self.gripper} deg")
-                                print("\n" + str(REQUEST_TYPES), flush=True)
-                                print("\nCHOOSE REQUEST OR PRESS 's' TO STOP PROGRAM: ", end="")
-                                
+                            
                                 # Put it Mailbox(Thread-safe)
                                 # This saves the data in RAM safely
-                                result = {"type": req_val, "Current_X": self.current_pos_x, "Current_Y": self.current_pos_y, "Current_Z": self.current_pos_z, "gripper": self.gripper}
-                                incoming_mailbox.put_nowait(result)
-                time.sleep(0.01)
+                                result = {
+                                    "type": req_val, 
+                                    "Current_X": self.current_pos_x, 
+                                    "Current_Y": self.current_pos_y, 
+                                    "Current_Z": self.current_pos_z, 
+                                    "gripper": self.gripper
+                                }
+                                
+                                # Always clear the mailbox to keep only the freshest coordinate
+                                while not incoming_mailbox.empty():
+                                    try: 
+                                        incoming_mailbox.get_nowait()
+                                    except: 
+                                        break
+                                    
+                                incoming_mailbox.put(result)
+          
+                # Reduced sleep time for faster polling in automatic mode
+                time.sleep(0.005)
 
             except Exception as e:
                 print(f"Serial Error: {e}")
                 time.sleep(1)
-
-    # def moving(self, request):
-    #     frame = [
-    #             request,
-    #             self.axes["X"],
-    #             self.axes["Y"],
-    #             self.axes["Z"],
-    #             self.gripper
-    #         ]
-
-    #     self.send_data(frame)
-    #     time.sleep(3)
-        
-    #     wp_x = 80
-    #     wp_y = 60
-    #     step = 10
-
-    #     dir_x = 1  # 1: turn right, -1: turn left
-
-    #     while True:
-    #         if self.axes["Y"] >= wp_y:
-    #             if (dir_x == 1 and self.axes["X"] >= wp_x) or (dir_x == -1 and self.axes["X"] <= 0):
-    #                 return
-    #                 # break 
-
-    #         # Move X
-    #         self.axes["X"] += dir_x * step
-
-    #         if self.axes["X"] > wp_x:
-    #             self.axes["X"] = wp_x
-    #             self.axes["Y"] += step
-    #             dir_x = -1
-    #         elif self.axes["X"] < 0:
-    #             self.axes["X"] = 0
-    #             self.axes["Y"] += step
-    #             dir_x = 1
-            

@@ -6,133 +6,125 @@ import threading
 import queue
 from camera import Mapping, CameraDetect
 
-#This Queue will hold the response forever til need
-incoming_mailbox = queue.Queue()
+class FarmBotSystem:
+    def __init__(self):
+        # --- 1. Initialize Shared Resources ---
+        self.incoming_mailbox = queue.Queue()
+        self.REQUEST_TYPES = {
+            0: "ASK_POSITION", 1: "RUN_SEQ", 2: "MOVE_XYZ", 
+            3: "GRIPPER", 4: "SETUP", 5: "HOMING", 
+            6: "MAPPING", 7: "RUN"
+        }
+        
+        # --- 2. Initialize Hardware & Software Modules ---
+        # Setup Serial communication with MCU (ESP32)
+        self.ser = serial.Serial(port="/dev/ttyUSB0", baudrate=115200, timeout=1)
+        self.uart = UART(ser=self.ser, incoming_mailbox=self.incoming_mailbox)
+        
+        # Initialize Coordinate Mapping logic
+        self.mapping = Mapping(uart=self.uart)
+        
+        # Initialize Computer Vision module (ONNX model)
+        ONNX_MODEL_PATH = "/home/minhthong/Desktop/code/farmbot/src/traffic_sign_model.onnx"
+        self.camera = CameraDetect(
+            model_onnx_path=ONNX_MODEL_PATH,
+            mapping=self.mapping,
+            enable_display=True
+        )
 
-# Initializ serial port
-ser = serial.Serial(port= "/dev/ttyUSB0", baudrate= 115200, timeout=1)
-uart = UART(ser=ser, incoming_mailbox=incoming_mailbox)
+        self.is_running = True
 
-# Init Mapping
-mapping = Mapping(uart=uart)
-ONNX_MODEL_PATH = "/home/minhthong/Desktop/code/farmbot/src/traffic_sign_model.onnx"
-
-# Init camera thread
-camera = CameraDetect(
-    model_onnx_path=ONNX_MODEL_PATH,
-    mapping=mapping,
-    enable_display=True
-)
-
-# Start threads
-camera.start()          # detect thread
-camera.start_display()  # display thread
-
-# --- Enum Mapping (For easy reading) ---
-REQUEST_TYPES = {
-    0: "ASK_CURRENT_POSITION",
-    1: "RUN_SEQUENCE",
-    2: "MOVE_XYZ",
-    3: "CONTROL_GRIPPER",
-    4: "SETUP_MATERIAL",
-    5: "HOMING",
-    6: "MOTION_COMPLETE",
-    7: "MAPPING",
-    8: "RUN"
-}
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# Start the listener
-t1 = threading.Thread(
-    target=uart.serial_listener,
-    args=(REQUEST_TYPES, incoming_mailbox),
-    daemon=True
-)
-t1.start()
-
-waiting_for_base_camera = False
-
-while True:
-    print("\n" + str(REQUEST_TYPES))
-    cmd = input("\nCHOOSE REQUEST OR PRESS 's' TO STOP PROGRAM: ").lower()
-
-    if cmd == "s":
-        break
-
-    if cmd == "":
-        continue
-
-    try:
-        cmd = int(cmd)
-        if cmd == 0:
-            waiting_for_base_camera = True
-            uart.request_ask_current_position(request=cmd)
+    def flush_mailbox(self):
+        """Clears old messages from the queue to prevent stale data processing"""
+        while not self.incoming_mailbox.empty():
             try:
-                result = incoming_mailbox.get()
-
-                # Nếu đang chờ mode 0 → update base_camera
-                if waiting_for_base_camera:
-                    x = result["Current_X"]
-                    y = result["Current_Y"]
-
-                    mapping.update_base_camera_position(x, y)
-                    waiting_for_base_camera = False
-
+                self.incoming_mailbox.get_nowait()
             except queue.Empty:
-                pass
-        elif cmd == 1:
-            uart.request_run_sequence(request=cmd)
+                break
+
+    def menu_thread(self):
+        """Dedicated thread for the User Interface (CLI)"""
+        while self.is_running:
+            print("\n" + "="*40)
+            print(f"AVAILABLE COMMANDS: {self.REQUEST_TYPES}")
+            user_input = input("ENTER COMMAND (or 's' to stop): ").lower().strip()
+
+            if user_input == 's':
+                self.is_running = False
+                break
             
+            if user_input == '':
+                continue
+
+            try:
+                cmd = int(user_input)
+                self.handle_logic(cmd)
+            except ValueError:
+                print("[!] Invalid input. Please enter a numeric command.")
+
+    def handle_logic(self, cmd):
+        """Dispatcher function to handle logic based on menu selection"""
+        self.flush_mailbox() # Clear queue before sending a new request
+
+        if cmd == 0:
+            # Request current coordinates from MCU
+            self.uart.request_ask_current_position(request=0)
+            try:
+                # Wait up to 2 seconds for a response
+                result = self.incoming_mailbox.get(timeout=2)
+                # Type 6 represents a Motion/Position update packet
+                if result["type"] == 6:
+                    print(result)
+                    self.mapping.update_base_camera_position(result["Current_X"], result["Current_Y"])
+                    print(f"\n[OK] Updated Base Pos: X={result['Current_X']}, Y={result['Current_Y']}")
+            except queue.Empty:
+                print("\n[TIMEOUT] No response from MCU for command 0")
+
         elif cmd == 2:
-            uart.request_move_xyz(request=cmd) 
-
+            self.uart.request_move_xyz(request=2)
         elif cmd == 3:
-            uart.request_controll_gripper(request=cmd)
-
-        elif cmd == 4: #Package 27 Bytes
-            bags = [1, 2, 60, 30, 50, 30,]
-            foils = [2, 60, 3, 10, 10]
-            holder = [100, 60, 30]
-
-            uart.send_setup_cmd(bags, foils, holder)
-
+            self.uart.request_controll_gripper(request=3)
         elif cmd == 5:
-            uart.request_homing(request=cmd)
-
+            self.uart.request_homing(request=5)
         elif cmd == 6:
-            continue
+            self.mapping.mapping()
         elif cmd == 7:
-            mapping.mapping()
-        elif cmd == 8:
-            mapping.run()
+            self.mapping.run()
         else:
-            print("\nInvalid command!\n")
-            
-    except ValueError:
-        print("\n[!] Please enter a valid number or 's'.")
+            print(f"\n[!] Command {cmd} is not yet implemented or invalid.")
 
-    # ---------- HANDLE RESPONSE FROM ESP ----------
+    def run_system(self):
+        """Initializes and manages the lifecycle of all system threads"""
+        print("--- System Starting ---")
+
+        # 1. UART Listener Thread (Daemon: closes automatically when main thread exits)
+        t_uart = threading.Thread(
+            target=self.uart.serial_listener, 
+            args=(self.REQUEST_TYPES, self.incoming_mailbox), 
+            daemon=True
+        )
+        
+        # 2. Menu Interface Thread
+        t_menu = threading.Thread(target=self.menu_thread)
+
+        # 3. Start Vision Processing (CameraDetect handles its own internal threading)
+        self.camera.start()
+        self.camera.start_display()
+
+        # Launch threads
+        t_uart.start()
+        t_menu.start()
+
+        # Keep main thread alive until user stops the menu
+        t_menu.join()
+        
+        # Cleanup
+        self.camera.stop()
+        print("--- System Shutdown Successful ---")
+
+if __name__ == "__main__":
+    # Setup logging format
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     
-    # time.sleep(1)
-
-    # uart.send_data(4, 40, 30, 0, ser) # run sequency automatically
-    # time.sleep(1)
-
-    # uart.send_data(4, 40, 30, 10, ser) # run sequency automatically
-    # time.sleep(1)
-
-
-
-# Check the mailbox
-# block=True means "Wait here until a data arrives"
-# timeout=10 means "Wait 10 second, then give up"
-
-# try:
-#     response = incoming_mailbox.get(block=True, timeout=10)
-
-#     if response['type'] == 4: # Assuing 5 is MOTION_COMPLETE
-#         print(f"Success! Motor Finished at X: {response['x']}")
-#     else:
-#         print("Got some other msg")
-# except queue.Empty:
-#     print("Timeout! Motor took too long or MCU is crashed")
+    farmbot = FarmBotSystem()
+    farmbot.run_system()

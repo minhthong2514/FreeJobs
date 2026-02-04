@@ -69,7 +69,7 @@ class Mapping:
         with self.lock:
             if (self.camera_bag_mm is None or np.isnan(self.camera_bag_mm).any() or np.isnan(self.base_camera_mm).any()):
                 return None
-
+            # print(f"base_camera_mm: {self.base_camera_mm}")
             bag_base_mm = self.base_camera_mm + self.camera_bag_mm
             final_position = bag_base_mm - self.camera_gripper_mm
             
@@ -85,58 +85,175 @@ class Mapping:
         with self.lock:
             return self.camera_bag_mm.copy()        
     
+    def moveZ_Up_Down(self, request=2):
+        # --- PHASE 1: MOVE GRIPPER DOWN ---
+        self.uart.axes["Z"] = 50  
+        frame_down = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+        self.uart.send_data(frame_down)
+
+        # Wait for Z to reach the DOWN position
+        arrival_z_down = False
+        while not arrival_z_down:
+            try:
+                result = self.uart.incoming_mailbox.get(timeout=2)
+                if result["type"] == 6:
+                    # Verify if current Z is within 1.0mm of target
+                    if abs(result["Current_Z"] - self.uart.axes["Z"]) < 1.0:
+                        print("Z reached target: DOWN")
+                        arrival_z_down = True
+            except queue.Empty:
+                self.uart.send_data(frame_down)
+
+        time.sleep(1)
+
+        # --- PHASE 2: MOVE GRIPPER UP ---
+        self.uart.axes["Z"] = 0  # Set target to home position
+        frame_up = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+        
+        print(f"Moving Z UP to: {self.uart.axes['Z']}")
+        self.uart.send_data(frame_up)
+
+        # Wait for Z to reach the UP position
+        arrival_z_up = False
+        while not arrival_z_up:
+            try:
+                result = self.uart.incoming_mailbox.get(timeout=2)
+                if result["type"] == 6:
+                    # Verify if current Z returned to 0
+                    if abs(result["Current_Z"] - self.uart.axes["Z"]) < 1.0:
+                        print("Z reached target: UP")
+                        arrival_z_up = True
+            except queue.Empty:
+                self.uart.send_data(frame_up)
+
+    # def moving(self, request=2):
+    #     raw_positions_lst = []
+    #     while True:
+    #         frame = [
+    #             request,
+    #             self.uart.axes["X"],
+    #             self.uart.axes["Y"],
+    #             self.uart.axes["Z"],
+    #             self.uart.gripper
+    #         ]
+
+    #         self.uart.send_data(frame)
+    #         time.sleep(0.1)
+    #         try:
+    #             result = self.uart.incoming_mailbox.get()
+    #             if result["type"] == 6:
+    #                 time.sleep(2)               # Time for updating current position
+    #                 self.uart.request_ask_current_position(request=0)
+    #                 current_x = result["Current_X"]
+    #                 current_y = result["Current_Y"]
+    #                 self.update_base_camera_position(current_x, current_y)
+    #                 raw_final_position = self.compute_final_base_position()
+    #                 if raw_final_position is not None:
+    #                     raw_positions_lst.append(raw_final_position)
+
+    #             # print(f"\nCurrent position: X={current_x}, Y={current_y}")
+                
+                
+    #         except queue.Empty:
+    #             print("Error: No response from robot!")
+
+
+    #         if self.uart.axes["Y"] >= self.wp_y:
+    #             if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
+    #                 print(f"\nList postions of object: {raw_positions_lst}")
+    #                 return raw_positions_lst
+    #                 # break 
+
+    #         # Move X
+    #         self.uart.axes["X"] += self.dir_move * self.step_move
+
+    #         if self.uart.axes["X"] > self.wp_x:
+    #             self.uart.axes["X"] = self.wp_x
+    #             self.uart.axes["Y"] += self.step_move
+    #             self.dir_move = -1                                                                                                                                                                                                                                                  
+    #         elif self.uart.axes["X"] < 0:
+    #             self.uart.axes["X"] = 0
+    #             self.uart.axes["Y"] += self.step_move
+    #             self.dir_move = 1
+    #         time.sleep(0.1)
+                
     def moving(self, request=2):
         raw_positions_lst = []
+        print("\n[MAPPING] Starting scanning process...")
+
         while True:
-            waiting_for_base_camera = True
-            frame = [
-                request,
-                self.uart.axes["X"],
-                self.uart.axes["Y"],
-                self.uart.axes["Z"],
-                self.uart.gripper
-            ]
+            # Init target coordinate frame
+            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
 
+            # CLEAR MAILBOX
+            while not self.uart.incoming_mailbox.empty():
+                try: self.uart.incoming_mailbox.get_nowait()
+                except: break
+
+            # SEND MOVE COMMAND
             self.uart.send_data(frame)
-            time.sleep(0.1)
-            self.uart.request_ask_current_position(request=0)
-            try:
-                result = self.uart.incoming_mailbox.get()
-                if waiting_for_base_camera and result["type"] == 6:
-                    time.sleep(1)               # Time for updating current position
-                    current_x = result["Current_X"]
-                    current_y = result["Current_Y"]
-                    self.update_base_camera_position(current_x, current_y)
-                    waiting_for_base_camera = False
-                    raw_final_position = self.compute_final_base_position()
-                    if raw_final_position is not None:
-                        raw_positions_lst.append(raw_final_position)
 
-                print(f"\nPhản hồi nhận được: X={current_x}, Y={current_y}")
-                
-                
-            except queue.Empty:
-                print("Lỗi: Không nhận được phản hồi từ Robot!")
+            # Init flag and counting
+            arrival_flag = False            
+            start_time = time.time()
 
+            while not arrival_flag:
+                try:
+                    # Wait for Motion Complete (Type 6) from Move Command
+                    result = self.uart.incoming_mailbox.get(timeout=2.0)
+                    
+                    if result["type"] == 6:
+                        time.sleep(1)           # Sleep for waiting camera
+                        # NOW ASK FOR ACTUAL POSITION
+                        self.uart.request_ask_current_position(request=0)
+                        result = self.uart.incoming_mailbox.get(timeout=1.0)
+                        print("\n--- RESPONSE FROM MCU ---")
+                        print(f"Type : {result['type']}")
+                        print(f"X    : {result['Current_X']} mm")
+                        print(f"Y    : {result['Current_Y']} mm")
+                        print(f"Z    : {result['Current_Z']} mm")
+                        print(f"Grip : {result['gripper']} deg")
 
+                        # Update axes with current position from ASK command
+                        self.uart.axes["X"] = result["Current_X"]
+                        self.uart.axes["Y"] = result["Current_Y"]
+                        
+                        self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])
+
+                        # Computing final position now
+                        raw_final_position = self.compute_final_base_position()
+                        print(f"Raw final position: {raw_final_position}")
+                        if raw_final_position is not None:
+                            raw_positions_lst.append(raw_final_position)
+                                
+                        arrival_flag = True 
+                    
+                except queue.Empty:
+                    print(f"[!] Timeout waiting for Type 6 at ({self.uart.axes['X']})...")
+                    self.uart.request_ask_current_position(request=0)
+                    if time.time() - start_time > 15.0: 
+                        return raw_positions_lst
+
+            # CHECK FINISH CONDITION
             if self.uart.axes["Y"] >= self.wp_y:
-                if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-                    print(f"\nList postions of object: {raw_positions_lst}")
+                if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or \
+                   (self.dir_move == -1 and self.uart.axes["X"] <= 0):
                     return raw_positions_lst
-                    # break 
 
-            # Move X
+            # CALCULATE NEXT STEP TO MOVE
             self.uart.axes["X"] += self.dir_move * self.step_move
-
+            
+            # Row switching logic
             if self.uart.axes["X"] > self.wp_x:
                 self.uart.axes["X"] = self.wp_x
                 self.uart.axes["Y"] += self.step_move
-                self.dir_move = -1                                                                                                                                                                                                                                                  
+                self.dir_move = -1
             elif self.uart.axes["X"] < 0:
                 self.uart.axes["X"] = 0
                 self.uart.axes["Y"] += self.step_move
                 self.dir_move = 1
-            time.sleep(0.1)
+            
+            time.sleep(0.05)
 
     def filtering_positions_lst(self, raw_list):
         # Convert the Python List to a Numpy Array before processing
@@ -232,7 +349,7 @@ class Mapping:
             
         return np.floor(np.array(final_positions) + 0.5).astype(int).tolist()
         
-    def mapping(self):
+    def mapping(self, request=2):
         # Reset final positions list for mapping
         self.final_positions_lst = []
 
@@ -246,34 +363,30 @@ class Mapping:
             print("Invalid input! Please enter an integer.")
             self.numbers_of_bag = 0
         
-        # # Request homing before mapping
-        # self.uart.request_homing(request=5)
-        # homing_flag = False
-        # print("\nRobot is homing...")
+        # Request homing before mapping
+        self.uart.request_homing(request=5)
+        homing_flag = False
+        print("\n[HOMING] Robot is homing...")
 
-        # # Start homing
-        # while not homing_flag:
-        #     try:
-        #         result = self.uart.incoming_mailbox.get()
+        # Start homing
+        while not homing_flag:
+            try:
+                result = self.uart.incoming_mailbox.get()
+                # print(result)
+                if result["type"] == 6:
+                    print("\n[HOMING] Homing is done!")
+                    homing_flag = True
 
-        #         if result["type"] == 6:
-        #             print("Homing is done!")
-
-        #             # Update current position
-        #             self.uart.axes["X"] = result["Current_X"]
-        #             self.uart.axes["Y"] = result["Current_Y"]
-        #             homing_flag = True
-        #     except queue.Empty:
-        #         print("[HOMING] Error!")
-        #         return []
+            except queue.Empty:
+                print("[HOMING] Error!")
+                return []
         
-        # time.sleep(1)
-        # print("\n[MAPPING] Starting scanning process...")
+        time.sleep(2)
 
         if self.numbers_of_bag != 0:
             # Step 1: Execute the movement and collect raw points
             raw_list = self.moving()
-            
+            print(raw_list)
             if not raw_list:
                 print("[MAPPING] Error: No data collected during scan.")
                 return []
@@ -282,6 +395,11 @@ class Mapping:
             print("[MAPPING] Scanning finished. Analyzing data...")
             self.final_positions_lst = self.filtering_positions_lst(raw_list)
             print(f"Final position is: {self.final_positions_lst}")
+            time.sleep(2)
+            # Go to base
+            self.uart.axes = {"X": 0, "Y": 0, "Z": 0}
+            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+            self.uart.send_data(frame)
     
     def run(self, request=2):
         if len(self.final_positions_lst) == 0:
@@ -317,23 +435,26 @@ class Mapping:
                     self.uart.send_data(frame)
 
             time.sleep(0.5)
-
-            # Move gripper DOWN
-            self.uart.axes["Z"] = 50
-            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
-            self.uart.send_data(frame)
-            time.sleep(3)
-
-            # self.uart.gripper = 1
+            self.moveZ_Up_Down()            # Call function to move Z
+            # # Move gripper DOWN
+            # self.uart.axes["Z"] = 50
+            # frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
             # self.uart.send_data(frame)
+            # while True:
+            #     result = self.uart.incoming_mailbox.get()
+
             # time.sleep(1)
 
-            # Move gripper UP
-            self.uart.axes["Z"] = 0
-            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
-            self.uart.send_data(frame)
+            # # self.uart.gripper = 1
+            # # self.uart.send_data(frame)
+            # # time.sleep(1)
 
-            time.sleep(3)
+            # # Move gripper UP
+            # self.uart.axes["Z"] = 0
+            # frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+            # self.uart.send_data(frame)
+
+            # time.sleep(3)
 
 # ===================================
 # Camera detection thread (vision only)
