@@ -45,6 +45,10 @@ class Mapping:
         P_center_mm = self.H @ p_center
         self.center_mm = P_center_mm[:2] / P_center_mm[2]
 
+    def compute_euclidean_dist(self, cluster):
+        center = np.mean(cluster, axis=0)
+        return np.sqrt(center[0]**2 + center[1]**2)
+    
     def pixel_to_world(self, u, v):
         # Convert pixel to mm using homography
         p = np.array([u, v, 1.0], dtype=np.float32)
@@ -75,6 +79,7 @@ class Mapping:
             
             # SAFETY BOUNDARY CHECK            
             target_x = final_position[0]
+            # target_y = final_position[1]
             if target_x < 0:
                 return None # Unreachable on the left
             if target_x > self.wp_x:
@@ -87,10 +92,16 @@ class Mapping:
     
     def moveZ_Up_Down(self, request=2):
         # --- PHASE 1: MOVE GRIPPER DOWN ---
+        # Open gripper firstly
+        self.uart.gripper = 90
+        self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+        time.sleep(0.5)
+
+        # Move Z after
         self.uart.axes["Z"] = 50  
         frame_down = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
         self.uart.send_data(frame_down)
-
+        print(f"\nMoving Z DOWN to: [{self.uart.axes['X'], self.uart.axes['Y'], self.uart.axes['Z']}]")
         # Wait for Z to reach the DOWN position
         arrival_z_down = False
         while not arrival_z_down:
@@ -99,18 +110,22 @@ class Mapping:
                 if result["type"] == 6:
                     # Verify if current Z is within 1.0mm of target
                     if abs(result["Current_Z"] - self.uart.axes["Z"]) < 1.0:
-                        print("Z reached target: DOWN")
+                        # print("Z reached target: DOWN")
                         arrival_z_down = True
+                        time.sleep(0.5)             # Stop in 0.5s
             except queue.Empty:
                 self.uart.send_data(frame_down)
 
-        time.sleep(1)
+        # Close gripper in 0.5s
+        self.uart.gripper = 20
+        self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+        time.sleep(0.5)
 
         # --- PHASE 2: MOVE GRIPPER UP ---
         self.uart.axes["Z"] = 0  # Set target to home position
         frame_up = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
         
-        print(f"Moving Z UP to: {self.uart.axes['Z']}")
+        print(f"Moving Z UP to: [{self.uart.axes['X'], self.uart.axes['Y'], self.uart.axes['Z']}]")
         self.uart.send_data(frame_up)
 
         # Wait for Z to reach the UP position
@@ -121,62 +136,15 @@ class Mapping:
                 if result["type"] == 6:
                     # Verify if current Z returned to 0
                     if abs(result["Current_Z"] - self.uart.axes["Z"]) < 1.0:
-                        print("Z reached target: UP")
+                        # print("Z reached target: UP")
                         arrival_z_up = True
             except queue.Empty:
                 self.uart.send_data(frame_up)
-
-    # def moving(self, request=2):
-    #     raw_positions_lst = []
-    #     while True:
-    #         frame = [
-    #             request,
-    #             self.uart.axes["X"],
-    #             self.uart.axes["Y"],
-    #             self.uart.axes["Z"],
-    #             self.uart.gripper
-    #         ]
-
-    #         self.uart.send_data(frame)
-    #         time.sleep(0.1)
-    #         try:
-    #             result = self.uart.incoming_mailbox.get()
-    #             if result["type"] == 6:
-    #                 time.sleep(2)               # Time for updating current position
-    #                 self.uart.request_ask_current_position(request=0)
-    #                 current_x = result["Current_X"]
-    #                 current_y = result["Current_Y"]
-    #                 self.update_base_camera_position(current_x, current_y)
-    #                 raw_final_position = self.compute_final_base_position()
-    #                 if raw_final_position is not None:
-    #                     raw_positions_lst.append(raw_final_position)
-
-    #             # print(f"\nCurrent position: X={current_x}, Y={current_y}")
-                
-                
-    #         except queue.Empty:
-    #             print("Error: No response from robot!")
-
-
-    #         if self.uart.axes["Y"] >= self.wp_y:
-    #             if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-    #                 print(f"\nList postions of object: {raw_positions_lst}")
-    #                 return raw_positions_lst
-    #                 # break 
-
-    #         # Move X
-    #         self.uart.axes["X"] += self.dir_move * self.step_move
-
-    #         if self.uart.axes["X"] > self.wp_x:
-    #             self.uart.axes["X"] = self.wp_x
-    #             self.uart.axes["Y"] += self.step_move
-    #             self.dir_move = -1                                                                                                                                                                                                                                                  
-    #         elif self.uart.axes["X"] < 0:
-    #             self.uart.axes["X"] = 0
-    #             self.uart.axes["Y"] += self.step_move
-    #             self.dir_move = 1
-    #         time.sleep(0.1)
-                
+        # Open gripper finally
+        self.uart.gripper = 90
+        self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+        time.sleep(0.5)
+        
     def moving(self, request=2):
         raw_positions_lst = []
         print("\n[MAPPING] Starting scanning process...")
@@ -205,8 +173,8 @@ class Mapping:
                     if result["type"] == 6:
                         time.sleep(1)           # Sleep for waiting camera
                         # NOW ASK FOR ACTUAL POSITION
-                        self.uart.request_ask_current_position(request=0)
-                        result = self.uart.incoming_mailbox.get(timeout=1.0)
+                        # self.uart.request_ask_current_position(request=0)
+                        # result = self.uart.incoming_mailbox.get(timeout=1.0)
                         print("\n--- RESPONSE FROM MCU ---")
                         print(f"Type : {result['type']}")
                         print(f"X    : {result['Current_X']} mm")
@@ -329,17 +297,29 @@ class Mapping:
                 warning_msg = "SAFE: No significant noise detected."
 
             if not should_remap:
-                for i in range(self.numbers_of_bag):
-                    avg_pos = np.mean(sorted_clusters[i], axis=0)
+                # --- NEW LOGIC: Re-sort valid clusters by Euclidean distance to (0,0) ---
+                valid_clusters = sorted_clusters[:self.numbers_of_bag]
+                
+                # The closest cluster to (0,0) will now be Rank 1
+                valid_clusters.sort(key=self.compute_euclidean_dist)
+                
+                #Extract final coordinates in the new optimized order
+                for cluster in valid_clusters:
+                    avg_pos = np.mean(cluster, axis=0)
                     final_positions.append(np.round(avg_pos, 2).tolist())
         else:
             warning_msg = "ERROR: Failed to find the required number of clusters."
 
         # --- DEBUG & RESULTS ---
         print(f"\n--- 2D SYSTEM ANALYSIS (n={self.numbers_of_bag}) ---")
-        for i, g in enumerate(final_selection):
+        # Logic display adjusted to show actual pick order if not re-mapping
+        display_list = valid_clusters if (not should_remap and len(final_positions) > 0) else final_selection
+        
+        for i, g in enumerate(display_list):
             label = "[VALID OBJECT]" if i < self.numbers_of_bag else "[SUSPECTED NOISE]"
-            print(f"Rank {i+1} {label}: {len(g)} points | Centroid: {np.round(np.mean(g, axis=0), 1)}")
+            centroid = np.mean(g, axis=0)
+            dist = np.sqrt(centroid[0]**2 + centroid[1]**2)
+            print(f"Rank {i+1} {label}: {len(g)} points | Dist: {dist:.1f}mm | Centroid: {np.round(centroid, 1)}")
 
         print("-" * 50)
         if should_remap:
@@ -411,7 +391,7 @@ class Mapping:
             self.uart.axes["Y"] = pos[1]
             self.uart.axes["Z"] = 0 
 
-            print(f"Moving to object at: X={self.uart.axes['X']}, Y={self.uart.axes['Y']}")
+            # print(f"Moving to object at: X={self.uart.axes['X']}, Y={self.uart.axes['Y']}")
             frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
             
             # Moving to position of object
@@ -424,37 +404,18 @@ class Mapping:
                 try:
                     result = self.uart.incoming_mailbox.get()
                     if result["type"] == 6:
+                        # Check distance between setpoint and feedback
                         dist_x = abs(result["Current_X"] - self.uart.axes["X"])
                         dist_y = abs(result["Current_Y"] - self.uart.axes["Y"])
-                        print(dist_x)
-                        print(dist_y)
+
                         if dist_x < 1.0 and dist_y < 1.0:
-                            print(f"Robot arrived at target!")
+                            # print(f"Robot arrived at target!")
                             arrival_flag = True
                 except queue.Empty:
                     self.uart.send_data(frame)
 
             time.sleep(0.5)
             self.moveZ_Up_Down()            # Call function to move Z
-            # # Move gripper DOWN
-            # self.uart.axes["Z"] = 50
-            # frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
-            # self.uart.send_data(frame)
-            # while True:
-            #     result = self.uart.incoming_mailbox.get()
-
-            # time.sleep(1)
-
-            # # self.uart.gripper = 1
-            # # self.uart.send_data(frame)
-            # # time.sleep(1)
-
-            # # Move gripper UP
-            # self.uart.axes["Z"] = 0
-            # frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
-            # self.uart.send_data(frame)
-
-            # time.sleep(3)
 
 # ===================================
 # Camera detection thread (vision only)
