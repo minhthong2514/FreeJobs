@@ -76,7 +76,9 @@ class FarmBotSystem:
                 if result["type"] == 6:
                     print(result)
                     self.mapping.update_base_camera_position(result["Current_X"], result["Current_Y"])
-                    print(f"\n[OK] Updated Base Pos: X={result['Current_X']}, Y={result['Current_Y']}")
+                    raw_final_position = self.mapping.compute_final_base_position()
+                    print(f"\nFinal positions: {raw_final_position}")
+                    # print(f"\n[OK] Updated Base Pos: X={result['Current_X']}, Y={result['Current_Y']}")
             except queue.Empty:
                 print("\n[TIMEOUT] No response from MCU for command 0")
 

@@ -15,7 +15,7 @@ Camera_params = np.load(
 class Mapping:
     def __init__(self, uart):
         self.uart = uart
-        self.wp_x, self.wp_y = np.array([160, 80], dtype=np.int32)
+        self.wp_x, self.wp_y = np.array([200, 80], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
         self.numbers_of_bag = 0
@@ -58,34 +58,82 @@ class Mapping:
         # Relative to image center
         return P_mm - self.center_mm
 
-    def update_bag_from_pixel(self, u, v):
+    def update_bag_from_pixel(self, all_bag_pixels):
         # Update bag position in camera frame
+        # with self.lock:
+        #     self.camera_bag_mm = self.pixel_to_world(u, v)
+        temp_list = []
+
+        for u, v in all_bag_pixels:
+            mm_offset = self.pixel_to_world(u, v)
+            temp_list.append(mm_offset)
+            
         with self.lock:
-            self.camera_bag_mm = self.pixel_to_world(u, v)
+            if temp_list:
+                self.camera_bag_mm = np.array(temp_list, dtype=np.float32)
+                # print(self.camera_bag_mm)
+            else:
+                self.camera_bag_mm = None
+
 
     def update_base_camera_position(self, x_mm, y_mm):
         # Update camera position from motion system
         with self.lock:
             self.base_camera_mm[:] = [x_mm, y_mm]
 
-    def compute_final_base_position(self):
-        # Compute final gripper position in base frame
-        with self.lock:
-            if (self.camera_bag_mm is None or np.isnan(self.camera_bag_mm).any() or np.isnan(self.base_camera_mm).any()):
-                return None
-            # print(f"base_camera_mm: {self.base_camera_mm}")
-            bag_base_mm = self.base_camera_mm + self.camera_bag_mm
-            final_position = bag_base_mm - self.camera_gripper_mm
+    # def compute_final_base_position(self):
+    #     # Compute final gripper position in base frame
+    #     with self.lock:
+    #         if (self.camera_bag_mm is None or np.isnan(self.camera_bag_mm).any() or np.isnan(self.base_camera_mm).any()):
+    #             return None
+    #         # print(f"base_camera_mm: {self.base_camera_mm}")
+    #         bag_base_mm = self.base_camera_mm + self.camera_bag_mm
+    #         final_position = bag_base_mm - self.camera_gripper_mm
             
-            # SAFETY BOUNDARY CHECK            
-            target_x = final_position[0]
-            # target_y = final_position[1]
-            if target_x < 0:
-                return None # Unreachable on the left
-            if target_x > self.wp_x:
-                return None
-            return final_position
+    #         # SAFETY BOUNDARY CHECK            
+    #         target_x = final_position[0]
+    #         target_y = final_position[1]
 
+    #         # If final position is safety, return it
+    #         if 0 <= target_x <= self.wp_x or 0 <= target_y <= self.wp_y:
+    #             return final_position
+    #         else:
+    #             return None
+    def compute_final_base_position(self):
+        list_final_positions = []
+
+        with self.lock:
+            # Check if data is missing or if robot position is invalid
+            if (self.camera_bag_mm is None or np.isnan(self.base_camera_mm).any()):
+                return None
+             
+            # Ensure bags is treated as a 2D array (N, 2)
+            bags = self.camera_bag_mm
+            if bags.ndim == 1:
+                bags = [bags]
+
+            for bag_offset in bags:
+                # Skip if this specific bag coordinate is invalid
+                if np.isnan(bag_offset).any():
+                    continue  
+
+                # Calculate position: Base = Current_Robot + Offset_from_Camera - Mechanical_Offset
+                bag_base_mm = self.base_camera_mm + bag_offset
+                final_position = bag_base_mm - self.camera_gripper_mm
+
+                target_x = final_position[0]
+                target_y = final_position[1]
+
+                # SAFETY BOUNDARY CHECK: Only add if within Workspace limits
+                # Note: Changed 'or' to 'and' for stricter safety (must be inside both X and Y)
+                if 0 <= target_x <= self.wp_x and 0 <= target_y <= self.wp_y:
+                    list_final_positions.append(final_position.copy())
+
+        if not list_final_positions:
+            return None
+        # Returns a list (can be empty, have 1 object, or multiple objects)
+        return list_final_positions
+    
     def get_camera_bag_mm(self):
         with self.lock:
             return self.camera_bag_mm.copy()        
@@ -146,7 +194,7 @@ class Mapping:
         time.sleep(0.5)
         
     def moving(self, request=2):
-        raw_positions_lst = []
+        list_raw_final_position = []
         print("\n[MAPPING] Starting scanning process...")
 
         while True:
@@ -192,7 +240,7 @@ class Mapping:
                         raw_final_position = self.compute_final_base_position()
                         print(f"Raw final position: {raw_final_position}")
                         if raw_final_position is not None:
-                            raw_positions_lst.append(raw_final_position)
+                            list_raw_final_position.append(raw_final_position)
                                 
                         arrival_flag = True 
                     
@@ -200,13 +248,13 @@ class Mapping:
                     print(f"[!] Timeout waiting for Type 6 at ({self.uart.axes['X']})...")
                     self.uart.request_ask_current_position(request=0)
                     if time.time() - start_time > 15.0: 
-                        return raw_positions_lst
+                        return list_raw_final_position
 
             # CHECK FINISH CONDITION
             if self.uart.axes["Y"] >= self.wp_y:
                 if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or \
                    (self.dir_move == -1 and self.uart.axes["X"] <= 0):
-                    return raw_positions_lst
+                    return list_raw_final_position
 
             # CALCULATE NEXT STEP TO MOVE
             self.uart.axes["X"] += self.dir_move * self.step_move
@@ -366,15 +414,20 @@ class Mapping:
         if self.numbers_of_bag != 0:
             # Step 1: Execute the movement and collect raw points
             raw_list = self.moving()
-            print(raw_list)
             if not raw_list:
                 print("[MAPPING] Error: No data collected during scan.")
                 return []
+            
+            # Flattend from 2D list to 1D list for before push in filtering function
+            flattened_list = []
+            for frame_data in raw_list:
+                if frame_data is not None: 
+                    for bag in frame_data: 
+                        flattened_list.append(bag)
 
-            # Step 2: Pass raw data to processing logic
             print("[MAPPING] Scanning finished. Analyzing data...")
-            self.final_positions_lst = self.filtering_positions_lst(raw_list)
-            print(f"Final position is: {self.final_positions_lst}")
+            self.final_positions_lst = self.filtering_positions_lst(flattened_list)
+            print(f"Final positions are: {self.final_positions_lst}")
             time.sleep(2)
             # Go to base
             self.uart.axes = {"X": 0, "Y": 0, "Z": 0}
@@ -638,48 +691,48 @@ class CameraDetect(threading.Thread):
         draw = frame.copy()
         h_frame, w_frame = frame.shape[:2]
         is_real_bbox = False
-
+        all_bag_pixels = []
         for i in idxs:
             x, y, w, h = boxes[i]
             u = (x * 2 + w) // 2
             v = (y * 2 + h) // 2
 
-            # cam_bag_mm_x = self.camera_bag_mm[0]
-            # cam_bag_mm_y = self.camera_bag_mm[1]
-
             label = self.classes[class_ids[i]]
-
-            
-            # Update mapping (example: stop = bag)
             color_box = (0, 255, 0)
+
             if label == "stop":
                 if self.is_real_bbox(x, y, w, h, w_frame, h_frame):
-                    self.mapping.update_bag_from_pixel(u, v)
+                    all_bag_pixels.append((u, v))
                     is_real_bbox = True
-
-                    camera_bag_mm = self.mapping.get_camera_bag_mm()
-                    final_position = self.mapping.compute_final_base_position()
-
-                    if final_position is not None:
-                        cv2.putText(
-                            draw,
-                            f"Final: X={final_position[0]:.2f}, Y={final_position[1]:.2f} mm",
-                            (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (0, 255, 255),
-                            2
-                        ) 
-                    cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)
-                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255,0,0), -1)
-                    cv2.line(draw, (int(self.cx), int(self.cy)), (u,v), (0,255,255), 2)
-                    cv2.putText(draw, f"({camera_bag_mm[0]:.2f}, {camera_bag_mm[1]:.2f})mm",
-                    (u+8,v+8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+                    cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)        # Draw circle of bbox centers
+                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)        # Draw circle of image center
+                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2)
                 else:
                     color_box = (0, 0, 255)
-                    
+
             cv2.rectangle(draw, (x, y), (x + w, y + h), color_box, 2)
-            cv2.putText(draw, label, (x, y - 5),cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(draw, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if is_real_bbox and all_bag_pixels:
+            # print(f"--- Frame Debug ---")
+            # print(f"Pixels detected: {all_bag_pixels}")
+            
+            self.mapping.update_bag_from_pixel(all_bag_pixels)
+            camera_bag_mm_list = self.mapping.get_camera_bag_mm()
+            list_final_positions = self.mapping.compute_final_base_position()
+
+            if list_final_positions is not None:
+                # print(f"Final Positions (Base Frame): {list_final_positions}")
+                for i, pos in enumerate(list_final_positions):
+                    y_offset = 30 + (i * 30)
+                    cv2.putText(draw, f"Bag-{i+1}: X={pos[0]:.1f}, Y={pos[1]:.1f} mm",
+                                (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            for j, (u_p, v_p) in enumerate(all_bag_pixels):
+                if j < len(camera_bag_mm_list):
+                    mm_val = camera_bag_mm_list[j]
+                    cv2.putText(draw, f"({mm_val[0]:.1f}, {mm_val[1]:.1f})mm", 
+                                (u_p + 8, v_p + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
         if not is_real_bbox:
             with self.mapping.lock:
