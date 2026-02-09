@@ -4,21 +4,22 @@ import threading
 import onnxruntime as ort
 import time
 import queue
+
 # Load calibration data
-Camera_params = np.load(
-    "/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz"
-)
+Camera_params = np.load("/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz")
 
 # =========================
-# Mapping class (math only)
+# Mapping class
 # =========================
 class Mapping:
     def __init__(self, uart):
         self.uart = uart
         self.wp_x, self.wp_y = np.array([200, 80], dtype=np.int32)
+        self.source_pickup_pos = np.array([30, 50], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
         self.numbers_of_bag = 0
+        self.tissues_per_bag = None
         self.final_positions_lst = []
         # Homography and intrinsic matrix
         self.H = Camera_params["H"]
@@ -45,9 +46,10 @@ class Mapping:
         P_center_mm = self.H @ p_center
         self.center_mm = P_center_mm[:2] / P_center_mm[2]
 
-    def compute_euclidean_dist(self, cluster):
-        center = np.mean(cluster, axis=0)
-        return np.sqrt(center[0]**2 + center[1]**2)
+    def compute_euclidean_dist(self, pos1, pos2=np.array([0, 0])):
+        p1 = np.array(pos1)
+        p2 = np.array(pos2)
+        return np.sqrt(np.sum((p1 - p2)**2))
     
     def pixel_to_world(self, u, v):
         # Convert pixel to mm using homography
@@ -60,10 +62,9 @@ class Mapping:
 
     def update_bag_from_pixel(self, all_bag_pixels):
         # Update bag position in camera frame
-        # with self.lock:
-        #     self.camera_bag_mm = self.pixel_to_world(u, v)
         temp_list = []
 
+        # Get value of the each position
         for u, v in all_bag_pixels:
             mm_offset = self.pixel_to_world(u, v)
             temp_list.append(mm_offset)
@@ -74,31 +75,12 @@ class Mapping:
                 # print(self.camera_bag_mm)
             else:
                 self.camera_bag_mm = None
-
-
+                
     def update_base_camera_position(self, x_mm, y_mm):
         # Update camera position from motion system
         with self.lock:
             self.base_camera_mm[:] = [x_mm, y_mm]
 
-    # def compute_final_base_position(self):
-    #     # Compute final gripper position in base frame
-    #     with self.lock:
-    #         if (self.camera_bag_mm is None or np.isnan(self.camera_bag_mm).any() or np.isnan(self.base_camera_mm).any()):
-    #             return None
-    #         # print(f"base_camera_mm: {self.base_camera_mm}")
-    #         bag_base_mm = self.base_camera_mm + self.camera_bag_mm
-    #         final_position = bag_base_mm - self.camera_gripper_mm
-            
-    #         # SAFETY BOUNDARY CHECK            
-    #         target_x = final_position[0]
-    #         target_y = final_position[1]
-
-    #         # If final position is safety, return it
-    #         if 0 <= target_x <= self.wp_x or 0 <= target_y <= self.wp_y:
-    #             return final_position
-    #         else:
-    #             return None
     def compute_final_base_position(self):
         list_final_positions = []
 
@@ -125,7 +107,6 @@ class Mapping:
                 target_y = final_position[1]
 
                 # SAFETY BOUNDARY CHECK: Only add if within Workspace limits
-                # Note: Changed 'or' to 'and' for stricter safety (must be inside both X and Y)
                 if 0 <= target_x <= self.wp_x and 0 <= target_y <= self.wp_y:
                     list_final_positions.append(final_position.copy())
 
@@ -136,8 +117,38 @@ class Mapping:
     
     def get_camera_bag_mm(self):
         with self.lock:
-            return self.camera_bag_mm.copy()        
-    
+            return self.camera_bag_mm.copy()     
+
+    def get_final_position(self, result):
+        # Wait in 1s
+        time.sleep(1)
+
+        # Update axes from result
+        self.uart.axes["X"] = result["Current_X"]
+        self.uart.axes["Y"] = result["Current_Y"]
+
+        # Update current position for calculating
+        self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])   
+
+        # Calculate final position
+        final_position = self.compute_final_base_position()
+
+        return final_position
+
+    def wait_for_arrival(self, request):
+        arrival_flag = False
+        while not arrival_flag:
+            try:
+                result = self.uart.incoming_mailbox.get(timeout=2.0)
+                if result["type"] == 6:
+                    dist_x = abs(result["Current_X"] - self.uart.axes["X"])
+                    dist_y = abs(result["Current_Y"] - self.uart.axes["Y"])
+                    if dist_x < 1.0 and dist_y < 1.0:
+                        arrival_flag = True
+            except queue.Empty:
+                frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+                self.uart.send_data(frame)
+                
     def moveZ_Up_Down(self, request=2):
         # --- PHASE 1: MOVE GRIPPER DOWN ---
         # Open gripper firstly
@@ -188,10 +199,6 @@ class Mapping:
                         arrival_z_up = True
             except queue.Empty:
                 self.uart.send_data(frame_up)
-        # Open gripper finally
-        self.uart.gripper = 90
-        self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
-        time.sleep(0.5)
         
     def moving(self, request=2):
         list_raw_final_position = []
@@ -219,7 +226,7 @@ class Mapping:
                     result = self.uart.incoming_mailbox.get(timeout=2.0)
                     
                     if result["type"] == 6:
-                        time.sleep(1)           # Sleep for waiting camera
+                        # time.sleep(1)           # Sleep for waiting camera
                         # NOW ASK FOR ACTUAL POSITION
                         # self.uart.request_ask_current_position(request=0)
                         # result = self.uart.incoming_mailbox.get(timeout=1.0)
@@ -231,13 +238,14 @@ class Mapping:
                         print(f"Grip : {result['gripper']} deg")
 
                         # Update axes with current position from ASK command
-                        self.uart.axes["X"] = result["Current_X"]
-                        self.uart.axes["Y"] = result["Current_Y"]
+                        # self.uart.axes["X"] = result["Current_X"]
+                        # self.uart.axes["Y"] = result["Current_Y"]
                         
-                        self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])
+                        # self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])
 
                         # Computing final position now
-                        raw_final_position = self.compute_final_base_position()
+                        # raw_final_position = self.compute_final_base_position()
+                        raw_final_position = self.get_final_position(result)
                         print(f"Raw final position: {raw_final_position}")
                         if raw_final_position is not None:
                             list_raw_final_position.append(raw_final_position)
@@ -436,42 +444,95 @@ class Mapping:
     
     def run(self, request=2):
         if len(self.final_positions_lst) == 0:
-            print("RE-Mapping, pls!")
+            print("[RUN] No bags mapped. Please run mapping first!")
             return
-        # print(self.final_positions_lst)
-        for pos in self.final_positions_lst:
-            self.uart.axes["X"] = pos[0]
-            self.uart.axes["Y"] = pos[1]
-            self.uart.axes["Z"] = 0 
 
-            # print(f"Moving to object at: X={self.uart.axes['X']}, Y={self.uart.axes['Y']}")
-            frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
-            
-            # Moving to position of object
-            self.uart.send_data(frame)  
-            # Asking MCU for sending current position
-            self.uart.request_ask_current_position(request=0)        
+        try:
+            self.tissues_per_bag = int(input("Enter number of seedlings per bag: "))
+        except ValueError:
+            print("[RUN] Input must be an integer!")
+            return
+        
+        if self.tissues_per_bag >= 0:
+            # Initialize task management: [ [x, y], number of tissues ]
+            current_tasks = [[list(pos), self.tissues_per_bag] for pos in self.final_positions_lst]
 
-            arrival_flag = False
-            while not arrival_flag:
-                try:
-                    result = self.uart.incoming_mailbox.get()
-                    if result["type"] == 6:
-                        # Check distance between setpoint and feedback
-                        dist_x = abs(result["Current_X"] - self.uart.axes["X"])
-                        dist_y = abs(result["Current_Y"] - self.uart.axes["Y"])
+            while current_tasks:
+                # --- STEP 1: MOVE TO FIXED SOURCE STATION ---
+                self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"] = self.source_pickup_pos[0], self.source_pickup_pos[1], 0
+                frame_source = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+                self.uart.send_data(frame_source)
+                
+                # Wait for Type 6 response to get actual source coordinates
+                arrival_source = None
+                list_tissues = None
+                while arrival_source is None:
+                    try:
+                        result = self.uart.incoming_mailbox.get(timeout=2.0)
+                        if result["type"] == 6:
+                            # Update robot position and detect tissue using consolidated function
+                            list_tissues = self.get_final_position(result)
+                            arrival_source = result
+                    except queue.Empty:
+                        self.uart.send_data(frame_source)
 
-                        if dist_x < 1.0 and dist_y < 1.0:
-                            # print(f"Robot arrived at target!")
-                            arrival_flag = True
-                except queue.Empty:
-                    self.uart.send_data(frame)
+                # --- STEP 2: PICKING PROCESS ---
+                if list_tissues and len(list_tissues) > 0:
+                    seed_pos = list_tissues[0] # Get the first position of tissue
+                    
+                    # Move to precise tissue coordinates
+                    self.uart.axes["X"], self.uart.axes["Y"] = int(seed_pos[0]), int(seed_pos[1])
+                    self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], 0, self.uart.gripper])
+                    self.wait_for_arrival(request) 
+                    
+                    # Execute picking (Lifts Z back to 0 while keeping gripper closed)
+                    self.moveZ_Up_Down() 
+                else:
+                    print("  [!] No seedling detected. Retrying source cycle...")
+                    continue
 
-            time.sleep(0.5)
-            self.moveZ_Up_Down()            # Call function to move Z
+                # --- STEP 3: FIND NEAREST BAG (EUCLIDEAN DISTANCE) ---
+                current_robot_pos = [self.uart.axes["X"], self.uart.axes["Y"]]
+                
+                # Finding nearest bag in the remaining task list
+                nearest_idx = min(
+                    range(len(current_tasks)), 
+                    key=lambda i: self.compute_euclidean_dist(current_tasks[i][0], current_robot_pos)
+                )
+                target_bag_pos = current_tasks[nearest_idx][0]
 
+                # --- STEP 4: MOVE TO BAG AND RELEASE (WITH VERTICAL MOVEMENT) ---
+                # 4.1 Move to bag horizontal position (Z=0)
+                self.uart.axes["X"], self.uart.axes["Y"] = int(target_bag_pos[0]), int(target_bag_pos[1])
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], 0, self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # 4.2 Lower Z-axis into the bag (Z=50)
+                self.uart.axes["Z"] = 50
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # 4.3 Open gripper to release tissue
+                self.uart.gripper = 90 
+                self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                time.sleep(0.5)
+
+                # 4.4 Lift Z-axis back to safe position (Z=0)
+                self.uart.axes["Z"] = 0
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # --- STEP 5: UPDATE TASK STATUS ---
+                current_tasks[nearest_idx][1] -= 1
+                if current_tasks[nearest_idx][1] <= 0:
+                    print(f"  [INFO] Bag at {target_bag_pos} is complete.")
+                    current_tasks.pop(nearest_idx)
+
+            print("\n[RUN] All bags filled. Returning home...")
+            self.uart.send_data([request, 0, 0, 0, 90])
+        
 # ===================================
-# Camera detection thread (vision only)
+# Camera detection thread
 # ===================================
 class CameraDetect(threading.Thread):
     def __init__(self, model_onnx_path, mapping, enable_display=True):
@@ -691,7 +752,7 @@ class CameraDetect(threading.Thread):
         draw = frame.copy()
         h_frame, w_frame = frame.shape[:2]
         is_real_bbox = False
-        all_bag_pixels = []
+        all_bag_pixels = []         # List of all bag positions (pixel)
         for i in idxs:
             x, y, w, h = boxes[i]
             u = (x * 2 + w) // 2
@@ -717,9 +778,9 @@ class CameraDetect(threading.Thread):
             # print(f"--- Frame Debug ---")
             # print(f"Pixels detected: {all_bag_pixels}")
             
-            self.mapping.update_bag_from_pixel(all_bag_pixels)
-            camera_bag_mm_list = self.mapping.get_camera_bag_mm()
-            list_final_positions = self.mapping.compute_final_base_position()
+            self.mapping.update_bag_from_pixel(all_bag_pixels)          # Update position of bag in frame (pixel) 
+            camera_bag_mm_list = self.mapping.get_camera_bag_mm()       # Calculate distance between camera and bag (mm)
+            list_final_positions = self.mapping.compute_final_base_position()   # Calculate final position for moving gripper to that
 
             if list_final_positions is not None:
                 # print(f"Final Positions (Base Frame): {list_final_positions}")
