@@ -31,7 +31,9 @@ class FarmBotSystem:
             mapping=self.mapping,
             enable_display=True
         )
-
+        # Connect class camera to class mapping
+        self.mapping.import_camera_to_mapping(self.camera)
+        
         self.is_running = True
 
     def flush_mailbox(self):
