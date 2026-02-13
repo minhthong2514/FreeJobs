@@ -64,12 +64,12 @@ class Mapping:
         # Relative to image center
         return P_mm - self.center_mm
 
-    def update_bag_from_pixel(self, all_bag_pixels):
+    def update_object_from_pixel(self, all_object_pixels):
         # Update bag position in camera frame
         temp_list = []
 
         # Get value of the each position
-        for u, v in all_bag_pixels:
+        for u, v in all_object_pixels:
             mm_offset = self.pixel_to_world(u, v)
             temp_list.append(mm_offset)
             
@@ -137,10 +137,10 @@ class Mapping:
         if self.camera is not None:
             if object_label == "tissue":
                 pixels = [t['center'] for t in self.camera.last_detected_tissues]
-                self.update_bag_from_pixel(pixels) # Use the same mapping logic
+                self.update_object_from_pixel(pixels) # Use the same mapping logic
             else:
                 pixels = self.camera.all_bag_pixels
-                self.update_bag_from_pixel(pixels)
+                self.update_object_from_pixel(pixels)
         # Calculate final position
         final_position = self.compute_final_base_position()
 
@@ -453,73 +453,141 @@ class Mapping:
             frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
             self.uart.send_data(frame)
     
-    # def calculate_tissues_drop_pos(self, bag_base_pos):
-    #     """
-    #     Calculates the final robot world coordinates (X, Y) to drop a seedling,
-    #     implementing an avoidance strategy if a seedling already exists in the bag.
-        
-    #     Args:
-    #         bag_base_pos (list/tuple): The base coordinates [x, y] of the target bag center.
-            
-    #     Returns:
-    #         tuple: (final_x, final_y) in integer mm for robot movement.
-    #     """
-    #     # 1. Initialize default drop position (Bag center adjusted by fixed Camera-to-Gripper offset)
-    #     final_x = bag_base_pos[0] - self.camera_gripper_mm[0]
-    #     final_y = bag_base_pos[1] - self.camera_gripper_mm[1]
-
-    #     # # 2. Thread-safe access to the latest detection data from Camera class
-    #     # with self.camera.lock:
-    #     #     # Create a local copy to avoid "dictionary changed size during iteration" errors
-    #     #     detected_tissues = list(self.camera.last_detected_tissues)
-
-    #     # # 3. Check if the bag is already occupied (Avoidance Logic)
-    #     # if len(detected_tissues) > 0:
-    #     #     # Analyze the first detected seedling (Seedling 1)
-    #     #     existing_seed = detected_tissues[0]
-    #     #     u, v = existing_seed['center']
-    #     #     w1, _ = existing_seed['size']
-            
-    #     #     # 4. Validity Check: Ensure the detected seedling is within a realistic radius of the bag center
-    #     #     # This prevents using stale data from the Source Station if AI hasn't updated yet.
-    #     #     if abs(u - self.cx) > 180 or abs(v - self.cy) > 180:
-    #     #         print("[LOGIC] Seedling detected is too far from center, likely stale data. Using center drop.")
-    #     #         return int(final_x), int(final_y)
-
-    #     #     # 5. Calculate Seedling 1's horizontal offset relative to the Camera center (mm)
-    #     #     offset_mm = self.pixel_to_world(u, v)
-            
-    #     #     # 6. Safety Margin: Define distance to move away from Seedling 1
-    #     #     # Combined width + extra clearance (e.g., 15mm)
-    #     #     safe_margin = w1 + 15 
-            
-    #     #     # 7. Directional Avoidance: If Seedling 1 is on the Right, move Left; otherwise move Right
-    #     #     if offset_mm[0] > 0: # Seedling 1 is in the right-half of the bag
-    #     #         avoid_x = -safe_margin
-    #     #     else: # Seedling 1 is in the left-half or dead center
-    #     #         avoid_x = safe_margin
-            
-    #     #     # 8. Boundary Constraint: Prevent the robot from dropping the seedling outside the bag radius
-    #     #     # Assuming a standard bag radius (e.g., 35mm), we clip the offset.
-    #     #     MAX_ALLOWED_OFFSET = 35
-    #     #     avoid_x = max(min(avoid_x, MAX_ALLOWED_OFFSET), -MAX_ALLOWED_OFFSET)
-                
-    #     #     final_x += avoid_x
-    #     #     print(f"[LOGIC] Avoidance triggered. Offset applied: {avoid_x:.1f}mm")
-
-    #     return int(final_x), int(final_y)
-    def calculate_tissues_drop_pos(self, bag_base_pos):
-        """
-        TEMPORARY DEBUG VERSION: 
-        Returns the mapped gripper position directly to test the 'run' flow.
-        """
-        # Just return the mapped coordinates without any AI adjustment
+    def calculate_tissues_drop_pos(self, bag_base_pos, dropped_count=0, margin=5, gap_dist=10):
+        # Default drop position is the center of the bag
         final_x = bag_base_pos[0]
         final_y = bag_base_pos[1]
+
+        with self.camera.lock:
+            detected_at_bag = list(self.camera.last_detected_tissues)
+            detected_bags = list(self.camera.last_detected_bags)
+
+        if not detected_bags: 
+            return int(final_x), int(final_y)
+
+        bag_w, bag_h = detected_bags[0]['size']
+        w2, h2 = self.current_tissue_size 
+
+        # Define priority patterns based on margin
+        r_x, r_y = (bag_w / 2 - margin), (bag_h / 2 - margin)
         
-        print(f"[DEBUG-FLOW] Target Bag: {bag_base_pos} -> Gripper will move to: {final_x, final_y}")
+        if self.tissues_per_bag == 1:
+            priority_points = [(0, 0)]
+            
+        elif self.tissues_per_bag == 2:
+            # For 2 tissues: Always use Diagonal corners first to avoid center
+            priority_points = [(-r_x, -r_y), (r_x, r_y), (0, 0)]
+        else:
+            # For 3+ tissues: 4 corners (Skip center to keep space open)
+            priority_points = [
+                (-r_x, -r_y), # Corner 1 (Top-Left)
+                (r_x, r_y),   # Corner 2 (Bottom-Right)
+                (r_x, -r_y),  # Corner 3 (Top-Right)
+                (-r_x, r_y)   # Corner 4 (Bottom-Left)
+            ]
+
+        # Use dropped_count to determine the starting priority point
+        # This ensures we don't pick the same corner twice even if AI misses previous tissues
+        start_idx = dropped_count % len(priority_points)
         
+        # Create a search list starting from the intended priority index
+        search_points = priority_points[start_idx:] + priority_points[:start_idx]
+
+        chosen_offset = None
+        for target_x, target_y in search_points:
+            is_valid = True
+            for tissue in detected_at_bag:
+                w1, h1 = tissue['size']
+                x1, y1 = self.pixel_to_world(tissue['center'][0], tissue['center'][1])
+                
+                req_dist_x = (w1 / 2) + (w2 / 2) + gap_dist
+                req_dist_y = (h1 / 2) + (h2 / 2) + gap_dist
+
+                if abs(target_x - x1) < req_dist_x and abs(target_y - y1) < req_dist_y:
+                    is_valid = False
+                    break
+            
+            if is_valid:
+                chosen_offset = (target_x, target_y)
+                break
+        
+        # Final position assignment and logging
+        if chosen_offset is not None:
+            final_x += chosen_offset[0]
+            final_y += chosen_offset[1]
+            
+            # Specific log for the first tissue placement
+            if dropped_count == 0:
+                print(f"[LOGIC] First Tissue: Placed at {chosen_offset}")
+            else:
+                print(f"[LOGIC] Tissue {dropped_count + 1}/{self.tissues_per_bag}: Found spot at {chosen_offset}")
+        else:
+            print(f"[LOGIC] Warning: All priority spots blocked for Tissue {dropped_count + 1}")
+
         return int(final_x), int(final_y)
+    
+    # def calculate_tissues_drop_pos(self, bag_base_pos):
+    #     # Default drop position is the center of the bag
+    #     final_x = bag_base_pos[0]
+    #     final_y = bag_base_pos[1]
+
+    #     with self.camera.lock:
+    #         detected_at_bag = list(self.camera.last_detected_tissues)
+    #         detected_bags = list(self.camera.last_detected_bags)
+
+    #     # Return to center if no bag is detected
+    #     if not detected_bags: 
+    #         return int(final_x), int(final_y)
+
+    #     # Get the real-world dimensions of the bag
+    #     bag_w, bag_h = detected_bags[0]['size']
+
+    #     # Start at the first bag 
+    #     if len(detected_at_bag) == 0:
+    #         # Position seed at Top-Left corner with 5mm margin from edges
+    #         edge_offset_x = -(bag_w / 2 - 5)
+    #         edge_offset_y = -(bag_h / 2 - 5)
+    #         final_x += edge_offset_x
+    #         final_y += edge_offset_y
+    #         print(f"[LOGIC] First Seed: Placed at top-left corner")
+
+    #     # Start at the second bag
+    #     else:
+    #         # Get size of current bag
+    #         w1, h1 = detected_at_bag[0]['size']
+    #         # Convert pixel of current bag to mm
+    #         x1, y1 = self.pixel_to_world(detected_at_bag[0]['center'][0], 
+    #                                     detected_at_bag[0]['center'][1])
+    #         # Get data of tissue is detected from thread process camera
+    #         w2, h2 = self.current_tissue_size 
+
+    #         # Calculate required center-to-center distance for a 10mm gap between BBox edges
+    #         # Formula: (Width1/2) + (Width2/2) + 10mm
+    #         req_dist_x = (w1 / 2) + (w2 / 2) + 10
+    #         req_dist_y = (h1 / 2) + (h2 / 2) + 10
+
+    #         # Check if placing Seed 2 at (0,0) center violates the 10mm gap
+    #         if abs(x1) < req_dist_x and abs(y1) < req_dist_y:
+    #             # Calculate necessary shift to reach the 10mm safety threshold
+    #             shift_x = req_dist_x - abs(x1)
+    #             # Shift in the opposite direction of Seed 1
+    #             avoid_x = shift_x if x1 < 0 else -shift_x
+                
+    #             # Boundary check: Ensure Seed 2 center stays within bag limits (5mm from edge)
+    #             limit_x = bag_w / 2 - 5
+    #             if abs(final_x + avoid_x - bag_base_pos[0]) > limit_x:
+    #                 # If X-axis shift exceeds bag boundary, try Y-axis shift instead
+    #                 shift_y = req_dist_y - abs(y1)
+    #                 avoid_y = shift_y if y1 < 0 else -shift_y
+    #                 final_y += avoid_y
+    #                 print(f"[LOGIC] Avoidance: Shifted along Y-axis")
+    #             else:
+    #                 final_x += avoid_x
+    #                 print(f"[LOGIC] Avoidance: Shifted along X-axis")
+    #         else:
+    #             print("[LOGIC] Center is safe: Placing at bag center")
+            
+    #     return int(final_x), int(final_y)
     
     def run(self, request=2):
         if len(self.final_positions_lst) == 0:
@@ -527,7 +595,7 @@ class Mapping:
             return
 
         try:
-            self.tissues_per_bag = int(input("Enter number of seedlings per bag: "))
+            self.tissues_per_bag = int(input("Enter number of tissues per bag: "))
         except ValueError:
             print("[RUN] Input must be an integer!")
             return
@@ -555,10 +623,13 @@ class Mapping:
                         if result["type"] == 6:
                             # Use target_type="tissue" to fetch seedlings from self.camera
                             list_tissues = self.get_final_position(result, object_label="tissue")
+                            with self.camera.lock:
+                                if self.camera.last_detected_tissues:
+                                    self.current_tissue_size = self.camera.last_detected_tissues[0]['size']
+
                             arrival_source = result
                     except queue.Empty:
                         self.uart.send_data(frame_source)
-
                 # --- STEP 2: PICKING PROCESS ---
                 if list_tissues and len(list_tissues) > 0:
                     seed_pos = list_tissues[0] # Get the first position of tissue
@@ -575,7 +646,7 @@ class Mapping:
                     with self.camera.lock:
                         self.camera.last_detected_tissues = []
                 else:
-                    print("  [!] No tissue detected. Retrying source cycle...")
+                    print("[!] No tissue detected. Retrying source cycle...")
                     continue
 
                 # --- STEP 3: FIND NEAREST BAG (EUCLIDEAN DISTANCE) ---
@@ -588,7 +659,6 @@ class Mapping:
 
                 # --- STEP 4: MOVE TO BAG AND RELEASE ---
                 # 4.1 MOVE CAMERA TO BAG CENTER (Inverse offset)
-                # We calculate where the camera needs to be so its optical center is over the bag
                 view_x = target_bag_pos[0] + self.camera_gripper_mm[0]
                 view_y = target_bag_pos[1] + self.camera_gripper_mm[1]
 
@@ -600,8 +670,12 @@ class Mapping:
                 time.sleep(1.5) 
 
                 # 4.3 CALCULATE FINAL DROP POSITION (Including Avoidance + Gripper Offset)
-                # This function will now take the Mapped Bag Position and return the Gripper Drop Position
-                drop_x, drop_y = self.calculate_tissues_drop_pos(target_bag_pos)
+                # Calculate how many tissues have already been dropped in this specific bag
+                # Calculation: Goal amount - Remaining amount in the task list
+                dropped_in_bag = self.tissues_per_bag - current_tasks[nearest_idx][1]
+                
+                # Pass the count into the logic to ensure we pick a NEW corner
+                drop_x, drop_y = self.calculate_tissues_drop_pos(target_bag_pos, dropped_count=dropped_in_bag)
 
                 # 4.4 MOVE GRIPPER TO TARGET
                 self.uart.axes["X"], self.uart.axes["Y"] = drop_x, drop_y
@@ -615,9 +689,8 @@ class Mapping:
 
                 # 4.6 OPEN GRIPPER TO RELEASE (Change gripper angle to 90)
                 self.uart.gripper = 90 
-                # Use request 3 if your protocol defines it as Gripper Command, or just 2
                 self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
-                time.sleep(0.5) # Small delay to ensure gripper is fully open
+                time.sleep(0.5) 
 
                 # 4.7 LIFT Z-AXIS BACK TO SAFE HEIGHT (Back to Z=0)
                 self.uart.axes["Z"] = 0
@@ -631,7 +704,7 @@ class Mapping:
                 # --- STEP 5: UPDATE TASK STATUS ---
                 current_tasks[nearest_idx][1] -= 1
                 if current_tasks[nearest_idx][1] <= 0:
-                    print(f"  [INFO] Bag at {target_bag_pos} is complete.")
+                    print(f"[INFO] Bag at {target_bag_pos} is complete.")
                     current_tasks.pop(nearest_idx)
 
             print("\n[RUN] All bags filled. Returning home...")
@@ -654,6 +727,9 @@ class CameraDetect(threading.Thread):
         # ---------------- External objects ----------------
         self.mapping = mapping
         self.enable_display = enable_display
+        self.all_bag_pixels = None
+        self.last_detected_bags = []
+        self.last_detected_tissues = []
 
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
@@ -876,9 +952,7 @@ class CameraDetect(threading.Thread):
         draw = frame.copy()
         h_frame, w_frame = frame.shape[:2]
         is_real_bbox = False
-        self.all_bag_pixels = []         # List of all bag positions (pixel)
-        all_tissue_data = []        # List to store tissue data
-
+        self.all_bag_pixels = []    # List of all bag positions (pixel)
         bags_bboxes_mm = []         # List for separated bag data
         tissues_bboxes_mm = []      # List for separated tissue data
         
@@ -912,19 +986,17 @@ class CameraDetect(threading.Thread):
             elif label == "go-ahead":
                 # Store separated tissue data
                 tissues_bboxes_mm.append({'center': (u, v), 'bbox': [x1_b, y1_b, x2_b, y2_b], 'size': (obj_w_mm, obj_h_mm)})
-                # Store center and full bbox for mm size calculation later
-                all_tissue_data.append({'center': (u, v), 'bbox': [x1_b, y1_b, x2_b, y2_b]})
                 cv2.circle(draw, (u, v), 5, (0, 255, 0), -1)
 
             cv2.rectangle(draw, (x, y), (x + w, y + h), color_box, 2)
             # Display label and real size next to the bbox
-            cv2.putText(draw, f"{label} {size_text}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(draw, f"{label}-{size_text}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_box, 2)
 
         if is_real_bbox and self.all_bag_pixels:
             # print(f"--- Frame Debug ---")
             # print(f"Pixels detected: {all_bag_pixels}")
             
-            self.mapping.update_bag_from_pixel(self.all_bag_pixels)          # Update position of bag in frame (pixel) 
+            self.mapping.update_object_from_pixel(self.all_bag_pixels)          # Update position of bag in frame (pixel) 
             camera_bag_mm_list = self.mapping.get_camera_bag_mm()       # Calculate distance between camera and bag (mm)
             list_final_positions = self.mapping.compute_final_base_position()   # Calculate final position for moving gripper to that
 
@@ -942,8 +1014,9 @@ class CameraDetect(threading.Thread):
                                 (u_p + 8, v_p + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
         # Store separated results to class attributes for global access
-        self.last_detected_bags = bags_bboxes_mm
-        self.last_detected_tissues = tissues_bboxes_mm
+        with self.lock:
+            self.last_detected_bags = bags_bboxes_mm
+            self.last_detected_tissues = tissues_bboxes_mm
         
         if not is_real_bbox:
             with self.mapping.lock:
