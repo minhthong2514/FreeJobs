@@ -1,0 +1,13 @@
+/venv
+*/*.so
+*/*__pycache__
+
+# Calib folder
+/calib-camera/images
+
+# Models folder
+/models/datasets
+/models/exporting
+/models/*.pt
+/models/*.onnx
+/models/*.engine
