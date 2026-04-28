@@ -10,4 +10,8 @@ sudo apt install v4l-utils
 ```bash
 v4l2-ctl -d /dev/video0 --list-ctrls
 ```
+3. Check camera resolution:
+```bash
+v4l2-ctl --device=/dev/video0 --list-formats-ext
+```
 After this step, a list of currently available controls on your camera will be displayed.
