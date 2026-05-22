@@ -1,0 +1,266 @@
+import time
+import cv2
+import numpy as np
+import pycuda.autoinit
+import pycuda.driver as cuda
+import tensorrt as trt
+
+class YoLov5TRT(object):
+    def __init__(self, engine_file_path, classes, conf_thresh, iou_thresh):
+        # Set attributes passed from external initialization
+        self.classes = classes
+        self.conf_threshold = conf_thresh
+        self.iou_threshold = iou_thresh
+
+        # Initialize CUDA context
+        self.ctx = cuda.Device(0).make_context()
+        self.stream = cuda.Stream()
+        TRT_LOGGER = trt.Logger(trt.Logger.INFO)
+        runtime = trt.Runtime(TRT_LOGGER)
+
+        # Read and deserialize the engine file
+        with open(engine_file_path, "rb") as f:
+            engine = runtime.deserialize_cuda_engine(f.read())
+        context = engine.create_execution_context()
+
+        host_inputs = []
+        cuda_inputs = []
+        host_outputs = []
+        cuda_outputs = []
+        bindings = []
+
+        for binding in engine:
+            size = trt.volume(engine.get_binding_shape(binding)) * engine.max_batch_size
+            dtype = trt.nptype(engine.get_binding_dtype(binding))
+            host_mem = cuda.pagelocked_empty(size, dtype)
+            cuda_mem = cuda.mem_alloc(host_mem.nbytes)
+            bindings.append(int(cuda_mem))
+            if engine.binding_is_input(binding):
+                self.input_w = engine.get_binding_shape(binding)[-1]
+                self.input_h = engine.get_binding_shape(binding)[-2]
+                host_inputs.append(host_mem)
+                cuda_inputs.append(cuda_mem)
+            else:
+                host_outputs.append(host_mem)
+                cuda_outputs.append(cuda_mem)
+
+        # Save properties to instance attributes
+        self.context = context
+        self.engine = engine
+        self.host_inputs = host_inputs
+        self.cuda_inputs = cuda_inputs
+        self.host_outputs = host_outputs
+        self.cuda_outputs = cuda_outputs
+        self.bindings = bindings
+        self.batch_size = engine.max_batch_size
+
+        # Calculate segmentation output lengths (Keep the original logic)
+        self.det_output_length = host_outputs[0].shape[0]
+        self.mask_output_length = host_outputs[1].shape[0]
+        self.seg_w = int(self.input_w / 4)
+        self.seg_h = int(self.input_h / 4)
+        self.seg_c = int(self.mask_output_length / (self.seg_w * self.seg_h))
+        self.det_row_output_length = self.seg_c + 6
+        
+        self.colors_obj = Colors()
+
+    def preprocess_image(self, raw_bgr_image):
+        image_raw = raw_bgr_image
+        h, w, c = image_raw.shape
+        image = cv2.cvtColor(image_raw, cv2.COLOR_BGR2RGB)
+        r_w = self.input_w / w
+        r_h = self.input_h / h
+        if r_h > r_w:
+            tw = self.input_w
+            th = int(r_w * h)
+            tx1 = tx2 = 0
+            ty1 = int((self.input_h - th) / 2)
+            ty2 = self.input_h - th - ty1
+        else:
+            tw = int(r_h * w)
+            th = self.input_h
+            tx1 = int((self.input_w - tw) / 2)
+            tx2 = self.input_w - tw - tx1
+            ty1 = ty2 = 0
+        image = cv2.resize(image, (tw, th))
+        image = cv2.copyMakeBorder(image, ty1, ty2, tx1, tx2, cv2.BORDER_CONSTANT, None, (128, 128, 128))
+        image = image.astype(np.float32)
+        image /= 255.0
+        image = np.transpose(image, [2, 0, 1])
+        image = np.expand_dims(image, axis=0)
+        image = np.ascontiguousarray(image)
+        return image, image_raw, h, w
+
+    def xywh2xyxy(self, origin_h, origin_w, x):
+        y = np.zeros_like(x)
+        r_w = self.input_w / origin_w
+        r_h = self.input_h / origin_h
+        if r_h > r_w:
+            y[:, 0] = x[:, 0] - x[:, 2] / 2
+            y[:, 2] = x[:, 0] + x[:, 2] / 2
+            y[:, 1] = x[:, 1] - x[:, 3] / 2 - (self.input_h - r_w * origin_h) / 2
+            y[:, 3] = x[:, 1] + x[:, 3] / 2 - (self.input_h - r_w * origin_h) / 2
+            y /= r_w
+        else:
+            y[:, 0] = x[:, 0] - x[:, 2] / 2 - (self.input_w - r_h * origin_w) / 2
+            y[:, 2] = x[:, 0] + x[:, 2] / 2 - (self.input_w - r_h * origin_w) / 2
+            y[:, 1] = x[:, 1] - x[:, 3] / 2
+            y[:, 3] = x[:, 1] + x[:, 3] / 2
+            y /= r_h
+        return y
+
+    def bbox_iou(self, box1, box2, x1y1x2y2=True):
+        if not x1y1x2y2:
+            b1_x1, b1_x2 = box1[:, 0] - box1[:, 2] / 2, box1[:, 0] + box1[:, 2] / 2
+            b1_y1, b1_y2 = box1[:, 1] - box1[:, 3] / 2, box1[:, 1] + box1[:, 3] / 2
+            b2_x1, b2_x2 = box2[:, 0] - box2[:, 2] / 2, box2[:, 0] + box2[:, 2] / 2
+            b2_y1, b2_y2 = box2[:, 1] - box2[:, 3] / 2, box2[:, 1] + box2[:, 3] / 2
+        else:
+            b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
+            b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
+
+        inter_rect_x1 = np.maximum(b1_x1, b2_x1)
+        inter_rect_y1 = np.maximum(b1_y1, b2_y1)
+        inter_rect_x2 = np.minimum(b1_x2, b2_x2)
+        inter_rect_y2 = np.minimum(b1_y2, b2_y2)
+        inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, 0, None) * \
+                     np.clip(inter_rect_y2 - inter_rect_y1 + 1, 0, None)
+        b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
+        b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
+        return inter_area / (b1_area + b2_area - inter_area + 1e-16)
+
+    def non_max_suppression(self, prediction, origin_h, origin_w, conf_thres, nms_thres):
+        boxes = prediction[prediction[:, 4] >= conf_thres]
+        if len(boxes) == 0: return np.array([])
+        boxes[:, :4] = self.xywh2xyxy(origin_h, origin_w, boxes[:, :4])
+        boxes[:, 0] = np.clip(boxes[:, 0], 0, origin_w - 1)
+        boxes[:, 2] = np.clip(boxes[:, 2], 0, origin_w - 1)
+        boxes[:, 1] = np.clip(boxes[:, 1], 0, origin_h - 1)
+        boxes[:, 3] = np.clip(boxes[:, 3], 0, origin_h - 1)
+        confs = boxes[:, 4]
+        boxes = boxes[np.argsort(-confs)]
+        keep_boxes = []
+        while boxes.shape[0]:
+            large_overlap = self.bbox_iou(np.expand_dims(boxes[0, :4], 0), boxes[:, :4]) > nms_thres
+            label_match = boxes[0, 5] == boxes[:, 5]
+            invalid = large_overlap & label_match
+            keep_boxes.append(boxes[0])
+            boxes = boxes[~invalid]
+        return np.stack(keep_boxes, 0) if len(keep_boxes) else np.array([])
+
+    def sigmoid(self, x):
+        return 1 / (1 + np.exp(-x))
+
+    def scale_mask(self, mask, ih, iw):
+        mask = cv2.resize(mask, (self.input_w, self.input_h))
+        r_w = self.input_w / (iw * 1.0)
+        r_h = self.input_h / (ih * 1.0)
+        if r_h > r_w:
+            w = self.input_w
+            h = int(r_w * ih)
+            x, y = 0, int((self.input_h - h) / 2)
+        else:
+            w = int(r_h * iw)
+            h = self.input_h
+            x, y = int((self.input_w - w) / 2), 0
+        crop = mask[y:y+h, x:x+w]
+        return cv2.resize(crop, (iw, ih))
+
+    def process_mask(self, output_proto_mask, result_proto_coef, result_boxes, ih, iw):
+        result_proto_masks = output_proto_mask.reshape(self.seg_c, self.seg_h, self.seg_w)
+        c, mh, mw = result_proto_masks.shape
+        masks = self.sigmoid((result_proto_coef @ result_proto_masks.astype(np.float32).reshape(c, -1))).reshape(-1, mh, mw)
+        mask_result = []
+        for mask, box in zip(masks, result_boxes):
+            mask_s = np.zeros((ih, iw))
+            crop_mask = self.scale_mask(mask, ih, iw)
+            x1, y1, x2, y2 = map(int, box[:4])
+            crop = crop_mask[y1:y2, x1:x2]
+            crop = np.where(crop >= 0.5, 1, 0).astype(np.uint8)
+            mask_s[y1:y2, x1:x2] = crop
+            mask_result.append(mask_s)
+        return np.array(mask_result)
+
+    def draw_mask(self, masks, colors_, im_src, alpha=0.5, enable_draw=None):
+        if enable_draw == True:
+            if len(masks) == 0: return
+            masks = np.ascontiguousarray(np.asarray(masks, dtype=np.uint8).transpose(1, 2, 0))
+            masks = np.asarray(masks, dtype=np.float32)
+            colors_ = np.asarray(colors_, dtype=np.float32)
+            s = masks.sum(2, keepdims=True).clip(0, 1)
+            masks = (masks @ colors_).clip(0, 255)
+            im_src[:] = masks * alpha + im_src * (1 - s * alpha)
+        return
+
+    def plot_one_box(self, x, img, color=None, label=None):
+        tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1
+        c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+        cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+        if label:
+            tf = max(tl - 1, 1)
+            t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+            cv2.rectangle(img, c1, (c1[0] + t_size[0], c1[1] - t_size[1] - 3), color, -1, cv2.LINE_AA)
+            cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+
+    def infer(self, raw_frames, enable_draw):
+        self.ctx.push()
+        batch_image_raw = []
+        batch_origin_h = []
+        batch_origin_w = []
+        batch_input_image = np.empty(shape=[self.batch_size, 3, self.input_h, self.input_w])
+
+        # Initialize boxes as empty array in case no objects are detected
+        boxes = np.array([])
+
+        for i, frame in enumerate(raw_frames):
+            input_image, img_raw, h, w = self.preprocess_image(frame)
+            batch_image_raw.append(img_raw)
+            batch_origin_h.append(h)
+            batch_origin_w.append(w)
+            np.copyto(batch_input_image[i], input_image)
+        
+        np.copyto(self.host_inputs[0], batch_input_image.ravel())
+        start = time.time()
+        cuda.memcpy_htod_async(self.cuda_inputs[0], self.host_inputs[0], self.stream)
+        self.context.execute_async(batch_size=self.batch_size, bindings=self.bindings, stream_handle=self.stream.handle)
+        cuda.memcpy_dtoh_async(self.host_outputs[0], self.cuda_outputs[0], self.stream)
+        cuda.memcpy_dtoh_async(self.host_outputs[1], self.cuda_outputs[1], self.stream)
+        self.stream.synchronize()
+        end = time.time()
+        self.ctx.pop()
+
+        output_bbox = self.host_outputs[0]
+        output_proto_mask = self.host_outputs[1]
+
+        for i in range(len(raw_frames)):
+            num = int(output_bbox[i * self.det_output_length])
+            pred = np.reshape(output_bbox[i * self.det_output_length + 1 :], (-1, self.det_row_output_length))[:num, :]
+            
+            boxes = self.non_max_suppression(pred, batch_origin_h[i], batch_origin_w[i], self.conf_threshold, self.iou_threshold)
+            
+            if len(boxes) > 0:
+                result_boxes = boxes[:, :4]
+                result_scores = boxes[:, 4]
+                result_classid = boxes[:, 5]
+                result_proto_coef = boxes[:, 6:]
+                
+                result_masks = self.process_mask(output_proto_mask, result_proto_coef, result_boxes, batch_origin_h[i], batch_origin_w[i])
+                self.draw_mask(result_masks, [self.colors_obj(x, True) for x in result_classid], batch_image_raw[i], enable_draw)
+                
+                for j in range(len(result_boxes)):
+                    label = "{}:{:.2f}".format(self.classes[int(result_classid[j])], result_scores[j])
+                    self.plot_one_box(result_boxes[j], batch_image_raw[i], color=self.colors_obj(result_classid[j], True), label=label)
+        
+        return batch_image_raw, end - start, boxes
+
+    def destroy(self):
+        self.ctx.pop()
+
+class Colors:
+    def __init__(self):
+        hexs = ('FF3838', 'FF9D97', 'FF701F', 'FFB21D', 'CFD231', '48F90A', '92CC17', '3DDB86', '1A9334', '00D4BB')
+        self.palette = [tuple(int(h[i:i+2], 16) for i in (0, 2, 4)) for h in hexs]
+        self.n = len(self.palette)
+    def __call__(self, i, bgr=False):
+        c = self.palette[int(i) % self.n]
+        return (c[2], c[1], c[0]) if bgr else c

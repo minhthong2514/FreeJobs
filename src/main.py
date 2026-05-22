@@ -1,10 +1,10 @@
 import serial
-import time
 from uart_protocol import UART
 import logging
 import threading
 import queue
 from camera import Mapping, CameraDetect
+import ctypes
 
 class FarmBotSystem:
     def __init__(self):
@@ -24,14 +24,20 @@ class FarmBotSystem:
         # Initialize Coordinate Mapping logic
         self.mapping = Mapping(uart=self.uart)
         
-        # Initialize Computer Vision module (ONNX model)
-        ONNX_MODEL_PATH = "/home/minhthong/Desktop/code/farmbot/src/traffic_sign_model.onnx"
+        # # Load plugin file
+        try:
+            ctypes.CDLL("libmyplugins.so")
+        except Exception as e:
+            print(f"Warning: Could not load libmyplugins.so. Error: {e}")
+
+        # # Initialize Computer Vision module (engine model)
+        ENGINE_MODEL_PATH = "../models/farmbot_seg_model.engine"
         self.camera = CameraDetect(
-            model_onnx_path=ONNX_MODEL_PATH,
+            engine_path=ENGINE_MODEL_PATH,
             mapping=self.mapping,
             enable_display=True
         )
-        # Connect class camera to class mapping
+        # # Connect class camera to class mapping
         self.mapping.import_camera_to_mapping(self.camera)
         
         self.is_running = True
@@ -78,8 +84,8 @@ class FarmBotSystem:
                 if result["type"] == 6:
                     print(result)
                     self.mapping.update_base_camera_position(result["Current_X"], result["Current_Y"])
-                    raw_final_position = self.mapping.compute_final_base_position()
-                    print(f"\nFinal positions: {raw_final_position}")
+                    raw_final_position = self.mapping.get_final_position(result)
+                    print(f"\nRaw final positions: {raw_final_position}")
                     # print(f"\n[OK] Updated Base Pos: X={result['Current_X']}, Y={result['Current_Y']}")
             except queue.Empty:
                 print("\n[TIMEOUT] No response from MCU for command 0")
@@ -111,8 +117,8 @@ class FarmBotSystem:
         # 2. Menu Interface Thread
         t_menu = threading.Thread(target=self.menu_thread)
 
-        # 3. Start Vision Processing (CameraDetect handles its own internal threading)
-        self.camera.start()
+        # # 3. Start Vision Processing (CameraDetect handles its own internal threading)
+        self.camera.start_camera()
         self.camera.start_display()
 
         # Launch threads
@@ -123,7 +129,7 @@ class FarmBotSystem:
         t_menu.join()
         
         # Cleanup
-        self.camera.stop()
+        self.camera.stop_camera()
         print("--- System Shutdown Successful ---")
 
 if __name__ == "__main__":

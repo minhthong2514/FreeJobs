@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 import threading
-import onnxruntime as ort
 import time
 import queue
+from yolov5_trt import YoLov5TRT
 
 # Load calibration data
 Camera_params = np.load("/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz")
@@ -15,7 +15,7 @@ class Mapping:
     def __init__(self, uart):
         self.uart = uart
         self.camera = None
-        self.wp_x, self.wp_y = np.array([200, 100], dtype=np.int32)
+        self.wp_x, self.wp_y = np.array([200, 80], dtype=np.int32)
         self.source_pickup_pos = np.array([30, 50], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
@@ -85,16 +85,17 @@ class Mapping:
         with self.lock:
             self.base_camera_mm[:] = [x_mm, y_mm]
 
-    def compute_final_base_position(self):
+    def compute_final_base_position(self, custom_objects=None):
         list_final_positions = []
 
         with self.lock:
+            target_objects = custom_objects if custom_objects is not None else self.camera_bag_mm
             # Check if data is missing or if robot position is invalid
-            if (self.camera_bag_mm is None or np.isnan(self.base_camera_mm).any()):
+            if (target_objects is None or np.isnan(self.base_camera_mm).any()):
                 return None
              
             # Ensure bags is treated as a 2D array (N, 2)
-            bags = self.camera_bag_mm
+            bags = target_objects
             if bags.ndim == 1:
                 bags = [bags]
 
@@ -123,7 +124,7 @@ class Mapping:
         with self.lock:
             return self.camera_bag_mm.copy()     
 
-    def get_final_position(self, result, object_label="bag"):
+    def get_final_position(self, result, object_label="sweet potato"):
         # Wait in 1s
         time.sleep(1)
 
@@ -135,10 +136,10 @@ class Mapping:
         self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])   
         
         if self.camera is not None:
-            if object_label == "tissue":
+            if object_label == "strawberry" or object_label == "sweet potato":
                 pixels = [t['center'] for t in self.camera.last_detected_tissues]
                 self.update_object_from_pixel(pixels) # Use the same mapping logic
-            else:
+            elif object_label == "bag":
                 pixels = self.camera.all_bag_pixels
                 self.update_object_from_pixel(pixels)
         # Calculate final position
@@ -714,15 +715,17 @@ class Mapping:
 # Camera detection thread
 # ===================================
 class CameraDetect(threading.Thread):
-    def __init__(self, model_onnx_path, mapping, enable_display=True):
+    def __init__(self, engine_path, mapping, enable_display=True):
         super().__init__(daemon=True)
-
+        
         # ---------------- Camera init ----------------
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.pipeline = (
+        "v4l2src device=/dev/video0 ! "
+        "image/jpeg, width=640, height=480, framerate=30/1 ! "
+        "jpegdec ! videoconvert ! video/x-raw, format=BGR ! appsink drop=true"
+        )
+        self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+        print("Hardware Driver successfully opened.")
 
         # ---------------- External objects ----------------
         self.mapping = mapping
@@ -734,8 +737,8 @@ class CameraDetect(threading.Thread):
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
         self.IOU_THRESH = 0.45
-        self.CONF_THRESH = 0.6
-        self.classes = ['go-ahead', 'stop', 'turn-around', 'turn-left', 'turn-right']
+        self.CONF_THRESH = 0.90
+        self.classes = ["strawberry", "sweet potato"]
 
         # ---------------- Camera calibration ----------------
         self.K = Camera_params["K"]
@@ -743,47 +746,68 @@ class CameraDetect(threading.Thread):
         self.newK = Camera_params["newK"]
 
         # ---------------- Thread control ----------------
-        self.running = True
+        # self.running = True
+        self.running = False    
+        self.draw_mask = False
+        self.frame_queue = queue.Queue(maxsize=2)
         self.lock = threading.Lock()
 
         # Shared frame for display
         self.det_frame = None
 
-        # ---------------- ONNX Runtime (init once) ----------------
-        providers = ort.get_available_providers()
-        print("Available providers:", providers)
-
-        if "CUDAExecutionProvider" in providers:
-            self.model = ort.InferenceSession(
-                model_onnx_path,
-                providers=["CUDAExecutionProvider"]
-            )
-            print("Using GPU for inference")
-        else:
-            self.model = ort.InferenceSession(
-                model_onnx_path,
-                providers=["CPUExecutionProvider"]
-            )
-            print("Using CPU for inference")
-
-        self.input_name = self.model.get_inputs()[0].name
+        # ---------------- TensorRT Inference Init ----------------
+        # Initialize the engine model
+        self.model = YoLov5TRT(engine_path, self.classes, self.CONF_THRESH, self.IOU_THRESH)
+        
+        # Initialize time tracker for FPS calculation
+        self.prev_time = time.time()
 
         # Display thread
         self.display_thread = None
+        self.capture_thread = None
 
         self.cx = self.K[0, 2]
         self.cy = self.K[1, 2]
     # ==========================================================
     # Public control
     # ==========================================================
-    def stop(self):
+    def stop_camera(self):
         self.running = False
         self.cap.release()
+        self.model.destroy()
+
+    def start_camera(self):
+        """Starts the log threads for capturing frames from the hardware"""
+        if self.running:
+            return
+        self.running = True
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+
+    def _capture_loop(self):
+        print("[CAMERA] Capture loop started.")
+        while self.running:
+            # Nếu hàng đợi đầy, ra lệnh cho phần cứng tự drop ảnh cũ (an toàn với GStreamer)
+            if self.frame_queue.full():
+                self.cap.grab()
+                time.sleep(0.005)
+                continue
+
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.005)
+                continue
+            
+            # Đẩy ảnh thô vào hàng đợi cực nhanh (< 1ms)
+            self.frame_queue.put(frame)
+            
+        self.cap.release()
+        print("[CAMERA] Capture loop stopped.")
 
     def start_display(self):
         if not self.enable_display:
             return
-
+        
         self.display_thread = threading.Thread(
             target=self._display_loop,
             daemon=True
@@ -814,76 +838,45 @@ class CameraDetect(threading.Thread):
     # ==========================================================
     # Thread 2: Display only
     # ==========================================================
+    # def _display_loop(self):
+    #     while self.running:
+    #         with self.lock:
+    #             if self.det_frame is not None:
+    #                 cv2.imshow("CameraDetect", self.det_frame)
+
+    #         if cv2.waitKey(1) & 0xFF == ord('q'):
+    #             self.running = False
+
+    #     cv2.destroyAllWindows()
+
     def _display_loop(self):
+        print("[DISPLAY] Display loop started.")
+        if self.enable_display:
+            cv2.namedWindow("FarmBot Vision", cv2.WINDOW_NORMAL)
+
         while self.running:
-            with self.lock:
-                if self.det_frame is not None:
-                    cv2.imshow("CameraDetect", self.det_frame)
+            # THAY THẾ ĐOẠN ĐỌC CAMERA TUẦN TỰ CŨ BẰNG LỆNH BỐC ẢNH TỪ QUEUE:
+            try:
+                frame = self.frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.running = False
+            # Giữ nguyên hàm infer_and_detect chạy tại luồng này
+            draw_frame = self.infer_and_detect(frame)
 
-        cv2.destroyAllWindows()
+            if self.enable_display and draw_frame is not None:
+                cv2.imshow("FarmBot Vision", draw_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.running = False
+                    break
+                    
+        if self.enable_display:
+            cv2.destroyAllWindows()
+        print("[DISPLAY] Display loop stopped.")
 
     # ==========================================================
     # Detection pipeline
     # ==========================================================
-    def preprocess(self, img):
-        h, w = img.shape[:2]
-        scale = self.INPUT_SIZE / max(h, w)
-        nh, nw = int(h * scale), int(w * scale)
-
-        img_resized = cv2.resize(img, (nw, nh))
-        pad_x = (self.INPUT_SIZE - nw) // 2
-        pad_y = (self.INPUT_SIZE - nh) // 2
-
-        canvas = np.full(
-            (self.INPUT_SIZE, self.INPUT_SIZE, 3),
-            114, dtype=np.uint8
-        )
-        canvas[pad_y:pad_y + nh, pad_x:pad_x + nw] = img_resized
-
-        img_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-        img_rgb = img_rgb.astype(np.float32) / 255.0
-        img_rgb = np.transpose(img_rgb, (2, 0, 1))
-        img_rgb = np.expand_dims(img_rgb, axis=0)
-
-        return img_rgb, scale, pad_x, pad_y
-
-    def nms(self, boxes, scores):
-        if len(boxes) == 0:
-            return []
-
-        boxes = np.array(boxes)
-        scores = np.array(scores)
-
-        x1 = boxes[:, 0]
-        y1 = boxes[:, 1]
-        x2 = boxes[:, 0] + boxes[:, 2]
-        y2 = boxes[:, 1] + boxes[:, 3]
-
-        areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-        order = scores.argsort()[::-1]
-
-        keep = []
-        while order.size > 0:
-            i = order[0]
-            keep.append(i)
-
-            xx1 = np.maximum(x1[i], x1[order[1:]])
-            yy1 = np.maximum(y1[i], y1[order[1:]])
-            xx2 = np.minimum(x2[i], x2[order[1:]])
-            yy2 = np.minimum(y2[i], y2[order[1:]])
-
-            w = np.maximum(0, xx2 - xx1 + 1)
-            h = np.maximum(0, yy2 - yy1 + 1)
-            inter = w * h
-
-            iou = inter / (areas[i] + areas[order[1:]] - inter)
-            order = order[1:][iou <= self.IOU_THRESH]
-
-        return keep
-
     def is_real_bbox(self, x, y, w, h, frame_w=640, frame_h=480, margin=15):
         # Calculate max boundaries
         x_min = x
@@ -919,107 +912,104 @@ class CameraDetect(threading.Thread):
         return round(float(width_mm), 2), round(float(height_mm), 2)
     
     def infer_and_detect(self, frame):
-        img_input, scale, pad_x, pad_y = self.preprocess(frame)
-        outputs = self.model.run(None, {self.input_name: img_input})
-        pred = outputs[0][0]
+        # The external model automatically draws masks and bboxes onto the raw frame
+        batch_results, infer_time, boxes = self.model.infer([frame], self.draw_mask)
+        
+        # Extract the processed frame containing standard AI overlays
+        draw = batch_results[0]
 
-        boxes, scores, class_ids = [], [], []
-
-        for det in pred:
-            conf = det[4]
-            if conf < self.CONF_THRESH:
-                continue
-
-            class_prob = det[5:]
-            class_id = int(np.argmax(class_prob))
-            score = conf * class_prob[class_id]
-            if score < self.CONF_THRESH:
-                continue
-
-            cx, cy, w, h = det[:4]
-
-            x1 = int((cx - w / 2 - pad_x) / scale)
-            y1 = int((cy - h / 2 - pad_y) / scale)
-            x2 = int((cx + w / 2 - pad_x) / scale)
-            y2 = int((cy + h / 2 - pad_y) / scale)
-
-            # boxes.append([x1, y1, x2 - x1, y2 - y1])
-            boxes.append([x1, y1, x2, y2]) # Changed to store full coordinates for size calculation
-            scores.append(score)
-            class_ids.append(class_id)
-
-        idxs = self.nms(boxes, scores)
-        draw = frame.copy()
         h_frame, w_frame = frame.shape[:2]
         is_real_bbox = False
         self.all_bag_pixels = []    # List of all bag positions (pixel)
         bags_bboxes_mm = []         # List for separated bag data
         tissues_bboxes_mm = []      # List for separated tissue data
         
-        for i in idxs:
-            x1_b, y1_b, x2_b, y2_b = boxes[i] # Get full coordinates
-            x, y, w, h = x1_b, y1_b, x2_b - x1_b, y2_b - y1_b # Keep existing x, y, w, h logic
-            
-            u = (x * 2 + w) // 2
-            v = (y * 2 + h) // 2
+        # Structure of each row in boxes: [x1, y1, x2, y2, confidence, class_id, ...]
+        if boxes is not None and len(boxes) > 0:
+            for box in boxes:
+                x1_b, y1_b, x2_b, y2_b = box[:4]
+                class_id = int(box[5])
+                
+                # Boundary safety check for class indices
+                if class_id >= len(self.classes):
+                    continue
+                    
+                label = self.classes[class_id]
 
-            label = self.classes[class_ids[i]]
-            color_box = (0, 255, 0)
-            
-            # Calculate real-world size in mm for the current object
-            obj_w_mm, obj_h_mm = self.get_object_size_mm([x1_b, y1_b, x2_b, y2_b])
-            size_text = f"{obj_w_mm}x{obj_h_mm}mm"
+                # Reconstruct standard width, height, and center coordinate configurations
+                x, y, w, h = int(x1_b), int(y1_b), int(x2_b - x1_b), int(y2_b - y1_b)
+                u = (x * 2 + w) // 2
+                v = (y * 2 + h) // 2
 
-            # Process the bag
-            if label == "stop":
-                if self.is_real_bbox(x, y, w, h, w_frame, h_frame):
-                    self.all_bag_pixels.append((u, v))
-                    # Store separated bag data
-                    bags_bboxes_mm.append({'center': (u, v), 'bbox': [x1_b, y1_b, x2_b, y2_b], 'size': (obj_w_mm, obj_h_mm)})
-                    is_real_bbox = True
-                    cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)        # Draw circle of bbox centers
-                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)        # Draw circle of image center
-                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2)
-                else:
-                    color_box = (0, 0, 255)
-            # Process the tissue
-            elif label == "go-ahead":
-                # Store separated tissue data
-                tissues_bboxes_mm.append({'center': (u, v), 'bbox': [x1_b, y1_b, x2_b, y2_b], 'size': (obj_w_mm, obj_h_mm)})
-                cv2.circle(draw, (u, v), 5, (0, 255, 0), -1)
+                # Calculate real-world dimensional metrics (mm) utilizing the preserved function
+                obj_w_mm, obj_h_mm = self.get_object_size_mm([x1_b, y1_b, x2_b, y2_b])
+                size_text = f"{obj_w_mm}x{obj_h_mm}mm"
 
-            cv2.rectangle(draw, (x, y), (x + w, y + h), color_box, 2)
-            # Display label and real size next to the bbox
-            cv2.putText(draw, f"{label}-{size_text}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_box, 2)
+                # Render object physical dimension values on the display interface
+                cv2.putText(draw, size_text, (x, y - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                # Process the growth container unit ("sweet potato" represents the bag target)
+                if label == "bag":
+                    if self.is_real_bbox(x, y, w, h, w_frame, h_frame):
+                        self.all_bag_pixels.append((u, v))
+                        bags_bboxes_mm.append({
+                            'center': (u, v), 
+                            'bbox': [x1_b, y1_b, x2_b, y2_b], 
+                            'size': (obj_w_mm, obj_h_mm)
+                        })
+                        is_real_bbox = True
+                        
+                        # Render target reference tracking lines for hardware alignment verification
+                        cv2.circle(draw, (u, v), 5, (0, 0, 255), -1)        # Target center anchor
+                        cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  # Optical center point
+                        cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2) # Offset vector
+                
+                # Process the biological seedling unit ("strawberry" represents the tissue sprout)
+                elif label == "strawberry" or label == "sweet potato":
+                    tissues_bboxes_mm.append({
+                        'center': (u, v), 
+                        'bbox': [x1_b, y1_b, x2_b, y2_b], 
+                        'size': (obj_w_mm, obj_h_mm)
+                    })
+                    cv2.circle(draw, (u, v), 5, (0, 255, 0), -1) # Sprout focal spot
 
         if is_real_bbox and self.all_bag_pixels:
-            # print(f"--- Frame Debug ---")
-            # print(f"Pixels detected: {all_bag_pixels}")
-            
-            self.mapping.update_object_from_pixel(self.all_bag_pixels)          # Update position of bag in frame (pixel) 
-            camera_bag_mm_list = self.mapping.get_camera_bag_mm()       # Calculate distance between camera and bag (mm)
-            list_final_positions = self.mapping.compute_final_base_position()   # Calculate final position for moving gripper to that
+            # Inject raw pixels into homography calculation arrays
+            self.mapping.update_object_from_pixel(self.all_bag_pixels)          
+            camera_bag_mm_list = self.mapping.get_camera_bag_mm()       
+            list_final_positions = self.mapping.compute_final_base_position()   
 
+            # Display calculated absolute robot base destination targets (Gantry Frame coordinates)
             if list_final_positions is not None:
-                # print(f"Final Positions (Base Frame): {list_final_positions}")
                 for i, pos in enumerate(list_final_positions):
                     y_offset = 30 + (i * 30)
                     cv2.putText(draw, f"Bag-{i+1}: X={pos[0]:.1f}, Y={pos[1]:.1f} mm",
                                 (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
+            # Display relative camera lens offset dimensions alongside individual objects
             for j, (u_p, v_p) in enumerate(self.all_bag_pixels):
                 if j < len(camera_bag_mm_list):
                     mm_val = camera_bag_mm_list[j]
                     cv2.putText(draw, f"({mm_val[0]:.1f}, {mm_val[1]:.1f})mm", 
                                 (u_p + 8, v_p + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
-        # Store separated results to class attributes for global access
+        # Safely pipe structural frames data to global thread monitoring attributes
         with self.lock:
             self.last_detected_bags = bags_bboxes_mm
             self.last_detected_tissues = tissues_bboxes_mm
         
+        # Reset relative tracking coordinate storage if data becomes unstable
         if not is_real_bbox:
             with self.mapping.lock:
                 self.mapping.camera_bag_mm = np.array([np.nan, np.nan], dtype=np.float32)
-        
+
+        # Calculate System FPS and Overlay performance text onto the frame
+        curr_time = time.time()
+        time_diff = curr_time - self.prev_time
+        fps = 1.0 / time_diff if time_diff > 0 else 0.0
+        self.prev_time = curr_time
+
+        # Display time of FPS and latency
+        cv2.putText(draw, f"FPS: {fps:.1f}", (20, 40), 1, 1.5, (0, 255, 0), 2)
+        cv2.putText(draw, f"Inference time: {infer_time*1000:.1f}ms", (20, 80), 1, 1.5, (0, 255, 0), 2)
         return draw
