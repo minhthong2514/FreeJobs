@@ -86,9 +86,12 @@ def draw_points(img):
 # ==============================
 # Open Camera
 # ==============================
-cap = cv2.VideoCapture(0)   # change index if needed
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+pipeline = (
+        "v4l2src device=/dev/video0 ! "
+        "image/jpeg, width=640, height=480, framerate=30/1 ! "
+        "jpegdec ! videoconvert ! video/x-raw, format=BGR ! appsink drop=true"
+        )
+cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 if not cap.isOpened():
     print("Cannot open camera")
     exit()

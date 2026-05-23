@@ -13,7 +13,7 @@ print(f"\nK: \n{K}")
 print(f"\nDistortion: \n{dist}")
 
 # Load image from dataset
-img = cv2.imread('/home/minhthong/Desktop/code/farmbot/calib-camera/result_imgs/homo_img.jpg')
+img = cv2.imread('/home/minhthong/Desktop/code/farmbot/calib-camera/result_imgs/homo_img2.jpg')
 h, w = img.shape[:2]
 newK, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w,h), 0)
 
@@ -21,14 +21,16 @@ newK, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w,h), 0)
 undist_img = cv2.undistort(img, K, dist, None, newK)
 
 # Checkerboard info
-CHECKERBOARD = (15, 10)
+CHECKERBOARD = (10, 8)
 cols, rows = CHECKERBOARD
-squares_size = 5.3333               # 5.3333mm
+# squares_size = 5.3333               # 5.3333mm
+squares_width_size = 58.8 / 11.0
+squares_height_size = 48.2 / 9.0
 
 # Create world points
 world_pts = np.zeros((cols * rows, 2), dtype=np.float32)
-world_pts[:, 0] = np.tile(np.arange(cols), rows) * squares_size
-world_pts[:, 1] = np.repeat(np.arange(rows), cols) * squares_size
+world_pts[:, 0] = np.tile(np.arange(cols), rows) * squares_width_size
+world_pts[:, 1] = np.repeat(np.arange(rows), cols) * squares_height_size
 
 # Find corners
 ret, corners = cv2.findChessboardCorners(undist_img, CHECKERBOARD)

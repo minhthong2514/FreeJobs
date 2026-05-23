@@ -1,15 +1,18 @@
 import cv2
 import os
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+pipeline = (
+        "v4l2src device=/dev/video0 ! "
+        "image/jpeg, width=640, height=480, framerate=30/1 ! "
+        "jpegdec ! videoconvert ! video/x-raw, format=BGR ! appsink drop=true"
+        )
+cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
 if not cap.isOpened():
     print("Can't open the camera.")
     exit()
 
-path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/images"
+path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/result_imgs"
 
 def get_next_available_index(folder_path):
     index = 1
