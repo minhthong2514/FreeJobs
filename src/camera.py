@@ -15,7 +15,7 @@ class Mapping:
     def __init__(self, uart):
         self.uart = uart
         self.camera = None
-        self.wp_x, self.wp_y = np.array([200, 80], dtype=np.int32)
+        self.limit_x_wp, self.limit_y_wp = np.array([200, 80], dtype=np.int32)
         self.source_pickup_pos = np.array([30, 50], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
@@ -27,7 +27,8 @@ class Mapping:
         self.K = Camera_params["K"]
         
         # Fixed mechanical offset (camera -> gripper), measured manually
-        self.camera_gripper_mm = np.array([16.0, -24.25], dtype=np.float32)
+        # self.camera_gripper_mm = np.array([16.0, -24.25], dtype=np.float32)
+        self.camera_gripper_mm = np.array([11.0, -29.25], dtype=np.float32)
 
         # Current camera position in base coordinate (updated externally)
         self.base_camera_mm = np.array([0.0, 0.0], dtype=np.float32)
@@ -54,16 +55,24 @@ class Mapping:
         p1 = np.array(pos1)
         p2 = np.array(pos2)
         return np.sqrt(np.sum((p1 - p2)**2))
-    
+
     def pixel_to_world(self, u, v):
-        # Convert pixel to mm using homography
-        p = np.array([u, v, 1.0], dtype=np.float32)
+        # Undistort single point using camera's dist coefficients
+        src_pt = np.array([[[u, v]]], dtype=np.float32)
+        
+        # Access dist directly from the imported camera object
+        dst_pt = cv2.undistortPoints(src_pt, self.K, self.camera.dist, P=self.K)
+        u_clean = dst_pt[0][0][0]
+        v_clean = dst_pt[0][0][1]
+
+        # Convert clean pixel to mm using homography
+        p = np.array([u_clean, v_clean, 1.0], dtype=np.float32)
         P_mm = self.H @ p
         P_mm = P_mm[:2] / P_mm[2]
 
         # Relative to image center
         return P_mm - self.center_mm
-
+    
     def update_object_from_pixel(self, all_object_pixels):
         # Update bag position in camera frame
         temp_list = []
@@ -98,8 +107,6 @@ class Mapping:
             bags = target_objects
             if bags.ndim == 1:
                 bags = [bags]
-            print(f"bags: {bags}")
-            print(f"camera_bag_mm: {self.camera_bag_mm}")
 
             for bag_offset in bags:
                 # Skip if this specific bag coordinate is invalid
@@ -109,14 +116,12 @@ class Mapping:
                 # Calculate position: Base = Current_Robot + Offset_from_Camera - Mechanical_Offset
                 bag_base_mm = self.base_camera_mm + bag_offset
                 final_position = bag_base_mm - self.camera_gripper_mm
-                print(f"bag_offset: {bag_offset}")
-                print(f"base_camera_mm: {self.base_camera_mm}")
-                print(f"bag_base_mm: {bag_base_mm}")
+
                 target_x = final_position[0]
                 target_y = final_position[1]
 
                 # SAFETY BOUNDARY CHECK: Only add if within Workspace limits
-                if 0 <= target_x <= self.wp_x and 0 <= target_y <= self.wp_y:
+                if 0 <= target_x <= self.limit_x_wp and 0 <= target_y <= self.limit_y_wp:
                     list_final_positions.append(final_position.copy())
 
         if not list_final_positions:
@@ -275,8 +280,8 @@ class Mapping:
                         return list_raw_final_position
 
             # CHECK FINISH CONDITION
-            if self.uart.axes["Y"] >= self.wp_y:
-                if (self.dir_move == 1 and self.uart.axes["X"] >= self.wp_x) or \
+            if self.uart.axes["Y"] >= self.limit_y_wp:
+                if (self.dir_move == 1 and self.uart.axes["X"] >= self.limit_x_wp) or \
                    (self.dir_move == -1 and self.uart.axes["X"] <= 0):
                     return list_raw_final_position
 
@@ -284,8 +289,8 @@ class Mapping:
             self.uart.axes["X"] += self.dir_move * self.step_move
             
             # Row switching logic
-            if self.uart.axes["X"] > self.wp_x:
-                self.uart.axes["X"] = self.wp_x
+            if self.uart.axes["X"] > self.limit_x_wp:
+                self.uart.axes["X"] = self.limit_x_wp
                 self.uart.axes["Y"] += self.step_move
                 self.dir_move = -1
             elif self.uart.axes["X"] < 0:
@@ -816,41 +821,6 @@ class CameraDetect(threading.Thread):
         )
         self.display_thread.start()
 
-    # ==========================================================
-    # Thread 1: Capture + Detect
-    # ==========================================================
-    # def run(self):
-    #     while self.running:
-    #         ret, frame = self.cap.read()
-    #         if not ret:
-    #             continue
-
-    #         # Undistort
-    #         frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
-
-    #         # Detect
-    #         draw = self.infer_and_detect(frame)
-
-    #         # Share frame for display
-    #         with self.lock:
-    #             self.det_frame = draw
-
-    #         time.sleep(0.001)
-
-    # ==========================================================
-    # Thread 2: Display only
-    # ==========================================================
-    # def _display_loop(self):
-    #     while self.running:
-    #         with self.lock:
-    #             if self.det_frame is not None:
-    #                 cv2.imshow("CameraDetect", self.det_frame)
-
-    #         if cv2.waitKey(1) & 0xFF == ord('q'):
-    #             self.running = False
-
-    #     cv2.destroyAllWindows()
-
     def _display_loop(self):
         print("[DISPLAY] Display loop started.")
         if self.enable_display:
@@ -863,7 +833,7 @@ class CameraDetect(threading.Thread):
                 continue
             
             # Undistort
-            frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
+            # frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
 
             # Detect
             draw = self.infer_and_detect(frame)
