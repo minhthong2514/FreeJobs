@@ -11,7 +11,10 @@ H = Camera_params["H"]
 K = Camera_params["K"]
 newK = Camera_params["newK"]
 dist = Camera_params["dist"]
-
+print(f"H: {H}")
+print(f"K: {K}")
+print(f"newK: {newK}")
+print(f"dist: {dist}")
 
 # ==============================
 # Global Variables

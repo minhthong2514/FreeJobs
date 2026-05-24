@@ -98,6 +98,8 @@ class Mapping:
             bags = target_objects
             if bags.ndim == 1:
                 bags = [bags]
+            print(f"bags: {bags}")
+            print(f"camera_bag_mm: {self.camera_bag_mm}")
 
             for bag_offset in bags:
                 # Skip if this specific bag coordinate is invalid
@@ -107,7 +109,9 @@ class Mapping:
                 # Calculate position: Base = Current_Robot + Offset_from_Camera - Mechanical_Offset
                 bag_base_mm = self.base_camera_mm + bag_offset
                 final_position = bag_base_mm - self.camera_gripper_mm
-
+                print(f"bag_offset: {bag_offset}")
+                print(f"base_camera_mm: {self.base_camera_mm}")
+                print(f"bag_base_mm: {bag_base_mm}")
                 target_x = final_position[0]
                 target_y = final_position[1]
 
@@ -787,7 +791,6 @@ class CameraDetect(threading.Thread):
     def _capture_loop(self):
         print("[CAMERA] Capture loop started.")
         while self.running:
-            # Nếu hàng đợi đầy, ra lệnh cho phần cứng tự drop ảnh cũ (an toàn với GStreamer)
             if self.frame_queue.full():
                 self.cap.grab()
                 time.sleep(0.005)
@@ -798,7 +801,6 @@ class CameraDetect(threading.Thread):
                 time.sleep(0.005)
                 continue
             
-            # Đẩy ảnh thô vào hàng đợi cực nhanh (< 1ms)
             self.frame_queue.put(frame)
             
         self.cap.release()
@@ -817,23 +819,23 @@ class CameraDetect(threading.Thread):
     # ==========================================================
     # Thread 1: Capture + Detect
     # ==========================================================
-    def run(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            if not ret:
-                continue
+    # def run(self):
+    #     while self.running:
+    #         ret, frame = self.cap.read()
+    #         if not ret:
+    #             continue
 
-            # Undistort
-            frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
+    #         # Undistort
+    #         frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
 
-            # Detect
-            draw = self.infer_and_detect(frame)
+    #         # Detect
+    #         draw = self.infer_and_detect(frame)
 
-            # Share frame for display
-            with self.lock:
-                self.det_frame = draw
+    #         # Share frame for display
+    #         with self.lock:
+    #             self.det_frame = draw
 
-            time.sleep(0.001)
+    #         time.sleep(0.001)
 
     # ==========================================================
     # Thread 2: Display only
@@ -855,17 +857,19 @@ class CameraDetect(threading.Thread):
             cv2.namedWindow("FarmBot Vision", cv2.WINDOW_NORMAL)
 
         while self.running:
-            # THAY THẾ ĐOẠN ĐỌC CAMERA TUẦN TỰ CŨ BẰNG LỆNH BỐC ẢNH TỪ QUEUE:
             try:
                 frame = self.frame_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
+            
+            # Undistort
+            frame = cv2.undistort(frame, self.K, self.dist, None, self.newK)
 
-            # Giữ nguyên hàm infer_and_detect chạy tại luồng này
-            draw_frame = self.infer_and_detect(frame)
+            # Detect
+            draw = self.infer_and_detect(frame)
 
-            if self.enable_display and draw_frame is not None:
-                cv2.imshow("FarmBot Vision", draw_frame)
+            if self.enable_display and draw is not None:
+                cv2.imshow("FarmBot Vision", draw)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     self.running = False
                     break
@@ -972,7 +976,9 @@ class CameraDetect(threading.Thread):
                         'size': (obj_w_mm, obj_h_mm)
                     })
                     cv2.circle(draw, (u, v), 5, (0, 255, 0), -1) # Sprout focal spot
-
+                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  # Optical center point
+                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2) # Offset vector
+                
         if is_real_bbox and self.all_bag_pixels:
             # Inject raw pixels into homography calculation arrays
             self.mapping.update_object_from_pixel(self.all_bag_pixels)          
