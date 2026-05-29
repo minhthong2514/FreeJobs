@@ -5,8 +5,8 @@ import time
 from yolov5_trt import YoLov5TRT
 
 # --- CẤU HÌNH ---
-ENGINE_PATH = "/home/minhthong/Desktop/code/farmbot/models/farmbot_seg_model.engine"
-PLUGIN_PATH = "libmyplugins.so"
+ENGINE_PATH = "/home/minhthong/Desktop/code/farmbot/models/small/farmbot_seg_small_model.engine"
+PLUGIN_PATH = "/home/minhthong/Desktop/code/farmbot/src/libmyplugins.so"
 LABELS = ["strawberry", "sweet potato"]
 CONF_THRESHOLD = 0.8
 IOU_THRESHOLD = 0.45

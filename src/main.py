@@ -13,7 +13,7 @@ class FarmBotSystem:
         self.REQUEST_TYPES = {
             0: "ASK_POSITION", 1: "RUN_SEQ", 2: "MOVE_XYZ", 
             3: "GRIPPER", 4: "SETUP", 5: "HOMING", 
-            6: "MAPPING", 7: "RUN"
+            6: "MAPPING", 7: "RUN", 8: "RUN_DEMO"
         }
         
         # --- 2. Initialize Hardware & Software Modules ---
@@ -31,7 +31,8 @@ class FarmBotSystem:
             print(f"Warning: Could not load libmyplugins.so. Error: {e}")
 
         # # Initialize Computer Vision module (engine model)
-        ENGINE_MODEL_PATH = "../models/farmbot_seg_model.engine"
+        ENGINE_MODEL_PATH = "../models/small/farmbot_seg_small_model.engine"
+
         self.camera = CameraDetect(
             engine_path=ENGINE_MODEL_PATH,
             mapping=self.mapping,
@@ -100,6 +101,8 @@ class FarmBotSystem:
             self.mapping.mapping()
         elif cmd == 7:
             self.mapping.run()
+        elif cmd == 8:
+            self.mapping.run_demo()
         else:
             print(f"\n[!] Command {cmd} is not yet implemented or invalid.")
 

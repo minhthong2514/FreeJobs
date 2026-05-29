@@ -16,7 +16,7 @@ class Mapping:
         self.uart = uart
         self.camera = None
         self.limit_x_wp, self.limit_y_wp = np.array([200, 80], dtype=np.int32)
-        self.source_pickup_pos = np.array([30, 50], dtype=np.int32)
+        self.source_pickup_pos = np.array([120, 20], dtype=np.int32)
         self.step_move = 20
         self.dir_move = 1
         self.numbers_of_bag = 0
@@ -133,7 +133,7 @@ class Mapping:
         with self.lock:
             return self.camera_bag_mm.copy()     
 
-    def get_final_position(self, result, object_label="sweet potato"):
+    def get_final_position(self, result, object_label=None):
         # Wait in 1s
         time.sleep(1)
 
@@ -144,16 +144,25 @@ class Mapping:
         # Update current position for calculating
         self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])   
         
+        # Check the sample in the list
+        if object_label is None:
+            print("[ERROR] object_label is missing in get_final_position!")
+            return None
+        
         if self.camera is not None:
-            if object_label == "strawberry" or object_label == "sweet potato":
-                pixels = [t['center'] for t in self.camera.last_detected_tissues]
-                self.update_object_from_pixel(pixels) # Use the same mapping logic
-            elif object_label == "bag":
+            # Route directly to specific item lists based on object_label
+            if object_label == "bag":
                 pixels = self.camera.all_bag_pixels
                 self.update_object_from_pixel(pixels)
+            elif object_label == "strawberry":
+                pixels = [t['center'] for t in self.camera.last_detected_strawberry]
+                self.update_object_from_pixel(pixels)
+            elif object_label == "sweet potato":
+                pixels = [t['center'] for t in self.camera.last_detected_sweet_potato]
+                self.update_object_from_pixel(pixels)
+            
         # Calculate final position
         final_position = self.compute_final_base_position()
-
         return final_position
 
     def wait_for_arrival(self, request):
@@ -178,7 +187,7 @@ class Mapping:
         time.sleep(0.5)
 
         # Move Z after
-        self.uart.axes["Z"] = 50  
+        self.uart.axes["Z"] = 45  
         frame_down = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
         self.uart.send_data(frame_down)
         print(f"\nMoving Z DOWN to: [{self.uart.axes['X'], self.uart.axes['Y'], self.uart.axes['Z']}]")
@@ -463,13 +472,23 @@ class Mapping:
             frame = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
             self.uart.send_data(frame)
     
-    def calculate_tissues_drop_pos(self, bag_base_pos, dropped_count=0, margin=5, gap_dist=10):
+    def calculate_tissues_drop_pos(self, bag_base_pos, dropped_count=0, margin=5, gap_dist=10, object_label=None):
         # Default drop position is the center of the bag
         final_x = bag_base_pos[0]
         final_y = bag_base_pos[1]
 
+        if object_label is None:
+            print("[ERROR] object_label is missing in calculate_tissues_drop_pos!")
+            return int(final_x), int(final_y)
+        
         with self.camera.lock:
-            detected_at_bag = list(self.camera.last_detected_tissues)
+            if object_label == "strawberry":
+                detected_at_bag = list(self.camera.last_detected_strawberry)
+            elif object_label == "sweet potato":
+                detected_at_bag = list(self.camera.last_detected_sweet_potato)
+            else:
+                detected_at_bag = []
+                
             detected_bags = list(self.camera.last_detected_bags)
 
         if not detected_bags: 
@@ -719,7 +738,147 @@ class Mapping:
 
             print("\n[RUN] All bags filled. Returning home...")
             self.uart.send_data([request, 0, 0, 0, 90])
+
+    def run_demo(self, request=2):
+        print("\n=== [DEMO MODE] STARTING SIMPLIFIED CYCLE ===")
         
+        # Fixed bag position for demo (X=100mm, Y=40mm)
+        # fixed_bag_pos = [[150.0, 30.0], [180.0, 60.0], [100.0, 100.0]]
+        fixed_bag_pos = [[150.0, 30.0], [100.0, 100.0]]
+
+        print(f"[DEMO] Total simulated bags configured: {len(fixed_bag_pos)}")
+        for idx, pos in enumerate(fixed_bag_pos):
+           print(f"  -> Bag {idx + 1}: X={pos[0]}, Y={pos[1]}")
+        # Bypass mapping by hardcoding the simulated bag position
+        self.final_positions_lst = fixed_bag_pos
+
+        try:
+            self.tissues_per_bag = int(input("Enter number of tissues per bag: "))
+        except ValueError:
+            print("[DEMO] Input must be an integer!")
+            return
+        
+        if self.tissues_per_bag >= 0:
+            # Initialize task queue with the fixed bag position
+            current_tasks = [[list(pos), self.tissues_per_bag] for pos in self.final_positions_lst]
+
+            while current_tasks:
+                # --- STEP 1: MOVE TO FIXED PICKUP STATION (30, 50) ---
+                with self.camera.lock:
+                    self.camera.last_detected_strawberry = []
+                    self.camera.last_detected_sweet_potato = []
+
+                self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"] = self.source_pickup_pos[0], self.source_pickup_pos[1], 0
+                frame_source = [request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper]
+                self.uart.send_data(frame_source)
+                
+                arrival_source = None
+                list_tissues = None
+                target_label = None
+
+                while arrival_source is None:
+                    try:
+                        result = self.uart.incoming_mailbox.get(timeout=2.0)
+                        if result["type"] == 6:
+                            # Read camera memory to check what model currently detects
+                            with self.camera.lock:
+                                if len(self.camera.last_detected_strawberry) > 0:
+                                    target_label = "strawberry"
+                                    self.current_tissue_size = self.camera.last_detected_strawberry[0]['size']
+                                elif len(self.camera.last_detected_sweet_potato) > 0:
+                                    target_label = "sweet potato"
+                                    self.current_tissue_size = self.camera.last_detected_sweet_potato[0]['size']
+
+                            # If a valid seedling is detected, fetch its coordinates
+                            if target_label is not None:
+                                detected_positions = self.get_final_position(result, object_label=target_label)
+                                # Validate that we actually locked at least one physical coordinate
+                                if detected_positions and len(detected_positions) > 0:
+                                    print(f"[DEMO] Locked target: {target_label}. Total items found: {len(detected_positions)}")
+                                    list_tissues = detected_positions
+                                    arrival_source = result
+                                else:
+                                    # Frame dropped during calculation, reset target and retry
+                                    target_label = None
+                                    self.uart.send_data(frame_source)
+                            else:
+                                # If camera sees nothing, force resent frame to keep thread spinning
+                                self.uart.send_data(frame_source)
+                    except queue.Empty:
+                        self.uart.send_data(frame_source)
+
+                # --- STEP 2: EXECUTE GRIPPER PICK CYCLES ---
+                if list_tissues and len(list_tissues) > 0:
+                    seed_pos = list_tissues[0]
+                    self.uart.axes["X"], self.uart.axes["Y"] = int(seed_pos[0]), int(seed_pos[1])
+                    self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], 0, self.uart.gripper])
+                    self.wait_for_arrival(request) 
+                    
+                    # Grip object and return Z axis to home (0)
+                    self.moveZ_Up_Down() 
+
+                    with self.camera.lock:
+                        if target_label == "strawberry":
+                            self.camera.last_detected_strawberry = []
+                        elif target_label == "sweet potato":
+                            self.camera.last_detected_sweet_potato = []
+                else:
+                    print("[DEMO] No tissue detected. Scanning source again...")
+                    continue
+
+                # --- STEP 3: MOVE TO FIXED BAG AND PLUG ANTI-COLLISION LOGIC ---
+                target_bag_pos = current_tasks[0][0]
+
+                # Move camera to fixed bag center with mechanical offsets
+                view_x = target_bag_pos[0] + self.camera_gripper_mm[0]
+                view_y = target_bag_pos[1] + self.camera_gripper_mm[1]
+                print(f"view_x: {view_x}")
+                print(f"view_y: {view_y}")
+                self.uart.axes["X"], self.uart.axes["Y"] = int(view_x), int(view_y)
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], 0, self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # Wait for model to scan current bag surface content
+                time.sleep(1.5) 
+
+                # Calculate dropped count to select optimal slot layout
+                dropped_in_bag = self.tissues_per_bag - current_tasks[0][1]
+                
+                # Original slot calculation logic remains untouched
+                drop_x, drop_y = self.calculate_tissues_drop_pos(target_bag_pos, dropped_count=dropped_in_bag, object_label=target_label)
+
+                # Move gripper to assigned anti-collision spot
+                self.uart.axes["X"], self.uart.axes["Y"] = drop_x, drop_y
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], 0, self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # Lower Z axis into the demo target container
+                self.uart.axes["Z"] = 40
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                # Release gripper (Open to 90 degrees)
+                self.uart.gripper = 90 
+                self.uart.send_data([3, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                time.sleep(0.5) 
+
+                # Return Z axis back to safety height
+                self.uart.axes["Z"] = 0
+                self.uart.send_data([request, self.uart.axes["X"], self.uart.axes["Y"], self.uart.axes["Z"], self.uart.gripper])
+                self.wait_for_arrival(request)
+
+                with self.camera.lock:
+                    self.camera.last_detected_sweet_potato = []
+
+                # Update current task counters
+                current_tasks[0][1] -= 1
+                if current_tasks[0][1] <= 0:
+                    print(f"[DEMO] Task complete for fixed bag: {target_bag_pos}")
+                    current_tasks.pop(0)
+
+            print("\n=== [DEMO MODE] FINISHED. RETURNING HOME ===")
+            self.uart.send_data([request, 0, 0, 0, 90])
+
 # ===================================
 # Camera detection thread
 # ===================================
@@ -741,7 +900,9 @@ class CameraDetect(threading.Thread):
         self.enable_display = enable_display
         self.all_bag_pixels = None
         self.last_detected_bags = []
-        self.last_detected_tissues = []
+        # self.last_detected_tissues = []
+        self.last_detected_strawberry = []
+        self.last_detected_sweet_potato = []
 
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
@@ -896,8 +1057,10 @@ class CameraDetect(threading.Thread):
         is_real_bbox = False
         self.all_bag_pixels = []    # List of all bag positions (pixel)
         bags_bboxes_mm = []         # List for separated bag data
-        tissues_bboxes_mm = []      # List for separated tissue data
-        
+        # tissues_bboxes_mm = []      # List for separated tissue data
+        strawberry_bboxes_mm = []
+        sweet_potato_bboxes_mm = []
+
         # Structure of each row in boxes: [x1, y1, x2, y2, confidence, class_id, ...]
         if boxes is not None and len(boxes) > 0:
             for box in boxes:
@@ -938,16 +1101,27 @@ class CameraDetect(threading.Thread):
                         cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  # Optical center point
                         cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2) # Offset vector
                 
-                # Process the biological seedling unit ("strawberry" represents the tissue sprout)
-                elif label == "strawberry" or label == "sweet potato":
-                    tissues_bboxes_mm.append({
+                # Separate list feeding for strawberry
+                elif label == "strawberry":
+                    strawberry_bboxes_mm.append({
                         'center': (u, v), 
                         'bbox': [x1_b, y1_b, x2_b, y2_b], 
                         'size': (obj_w_mm, obj_h_mm)
                     })
-                    cv2.circle(draw, (u, v), 5, (0, 255, 0), -1) # Sprout focal spot
-                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  # Optical center point
-                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2) # Offset vector
+                    cv2.circle(draw, (u, v), 5, (0, 255, 0), -1) 
+                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  
+                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2) 
+
+                # Separate list feeding for sweet potato
+                elif label == "sweet potato":
+                    sweet_potato_bboxes_mm.append({
+                        'center': (u, v), 
+                        'bbox': [x1_b, y1_b, x2_b, y2_b], 
+                        'size': (obj_w_mm, obj_h_mm)
+                    })
+                    cv2.circle(draw, (u, v), 5, (0, 255, 255), -1) 
+                    cv2.circle(draw, (int(self.cx), int(self.cy)), 5, (255, 0, 0), -1)  
+                    cv2.line(draw, (int(self.cx), int(self.cy)), (u, v), (0, 255, 255), 2)
                 
         if is_real_bbox and self.all_bag_pixels:
             # Inject raw pixels into homography calculation arrays
@@ -972,7 +1146,9 @@ class CameraDetect(threading.Thread):
         # Safely pipe structural frames data to global thread monitoring attributes
         with self.lock:
             self.last_detected_bags = bags_bboxes_mm
-            self.last_detected_tissues = tissues_bboxes_mm
+            # self.last_detected_tissues = tissues_bboxes_mm
+            self.last_detected_strawberry = strawberry_bboxes_mm
+            self.last_detected_sweet_potato = sweet_potato_bboxes_mm
         
         # Reset relative tracking coordinate storage if data becomes unstable
         if not is_real_bbox:
