@@ -12,7 +12,7 @@ if not cap.isOpened():
     print("Can't open the camera.")
     exit()
 
-path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/result_imgs"
+path = r"/home/minhthong/Desktop/code/farmbot/calib-camera/images"
 
 def get_next_available_index(folder_path):
     index = 1

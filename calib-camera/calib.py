@@ -3,10 +3,10 @@ import numpy as np
 import glob
 
 # Checkerboard size (number of inner corners)
-CHECKERBOARD = (15, 10)  # change if your pattern is different
+CHECKERBOARD = (10, 8)  # change if your pattern is different
 
 # Square size in mm
-square_size = 5.3333  # 5.3333 mm
+square_size = 58.8 / 11.0
 
 # Create 3D points for the real-world plane (Z = 0)
 objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
