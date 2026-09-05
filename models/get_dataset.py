@@ -2,7 +2,7 @@ import cv2
 import os
 
 
-label = "both_in_frame"
+label = "bag"
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -11,7 +11,7 @@ if not cap.isOpened():
     print("Can't open the camera.")
     exit()
 
-path = r"/home/minhthong/Desktop/code/farmbot/models/datasets/both_in_frame"
+path = r"/home/minhthong/Desktop/code/farmbot/models/datasets/bags"
 
 def get_next_available_index(folder_path):
     index = 1

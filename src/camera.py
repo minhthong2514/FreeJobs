@@ -23,7 +23,7 @@ class Mapping:
         self.tissues_per_bag = None
         self.final_positions_lst = []
         # Homography and intrinsic matrix
-        self.H = Camera_params["H"]
+        self.H = Camera_params["H_bag"]
         self.K = Camera_params["K"]
         
         # Fixed mechanical offset (camera -> gripper), measured manually
@@ -907,8 +907,8 @@ class CameraDetect(threading.Thread):
         # ---------------- Detection params ----------------
         self.INPUT_SIZE = 640
         self.IOU_THRESH = 0.45
-        self.CONF_THRESH = 0.90
-        self.classes = ["strawberry", "sweet potato"]
+        self.CONF_THRESH = 0.8
+        self.classes = ["bag", "strawberry", "sweet potato"]
 
         # ---------------- Camera calibration ----------------
         self.K = Camera_params["K"]

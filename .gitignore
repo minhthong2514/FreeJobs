@@ -1,14 +1,19 @@
 /venv
 */*.so
 */*__pycache__
+
 # Calib folder
 /calib-camera/images
 
 # Models folder
-/models/datasets
-/models/exporting
-/models/nano
-/models/small
+/models/datasets/
+/models/exporting/
+/models/nano/
+/models/small/
+/models/model*/
+
+# Ignore weights & model formats
 /models/*.pt
 /models/*.onnx
 /models/*.engine
+/models/*.wts

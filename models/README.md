@@ -9,7 +9,7 @@ https://github.com/wang-xinyu/tensorrtx/blob/master/yolov5/README.md
 ```bash
 python gen_wts.py -w farmbot_seg_model.pt -o farmbot_seg_model.wts -t seg
 ```
-**Note:** Type seg is segmentation, default is detection.
+**Note:** Type seg is segmentation, default is detection. If you reached `Segmentation fault (Core dumped)`, You should switch to another device.
 
 ## Method 2: Converting step by step from pt to engine (Recommended for Jetson which can install ultralyctics)
 ### Exporting pt format to onnx format

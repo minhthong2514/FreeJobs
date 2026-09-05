@@ -30,8 +30,8 @@ class FarmBotSystem:
         except Exception as e:
             print(f"Warning: Could not load libmyplugins.so. Error: {e}")
 
-        # # Initialize Computer Vision module (engine model)
-        ENGINE_MODEL_PATH = "../models/small/farmbot_seg_small_model.engine"
+        # Initialize Computer Vision module (engine model)
+        ENGINE_MODEL_PATH = "../models/nano/farmbot_seg_model.engine"
 
         self.camera = CameraDetect(
             engine_path=ENGINE_MODEL_PATH,
