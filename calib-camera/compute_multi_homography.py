@@ -46,6 +46,11 @@ def compute_homography_single(img_path, checkerboard, squares_w, squares_h, labe
         # Calculate HOMOGRAPHY matrix
         H, mask = cv2.findHomography(pixels_pts, world_pts, cv2.RANSAC, 5.0)
 
+        if H[0][0] < 0:
+            print(f"[FIX] Đảo ngược thứ tự corners cho {label} để đồng nhất hệ tọa độ...")
+            pixels_pts = pixels_pts[::-1] 
+            H, mask = cv2.findHomography(pixels_pts, world_pts, cv2.RANSAC, 5.0)
+        
         # Verify calibration accuracy
         errors = []
         for i in range(len(pixels_pts)):
