@@ -44,7 +44,6 @@ class FarmBotSystem:
         self.is_running = True
 
     def flush_mailbox(self):
-        """Clears old messages from the queue to prevent stale data processing"""
         while not self.incoming_mailbox.empty():
             try:
                 self.incoming_mailbox.get_nowait()
@@ -52,7 +51,6 @@ class FarmBotSystem:
                 break
 
     def menu_thread(self):
-        """Dedicated thread for the User Interface (CLI)"""
         while self.is_running:
             print("\n" + "="*40)
             print(f"AVAILABLE COMMANDS: {self.REQUEST_TYPES}")
@@ -72,7 +70,6 @@ class FarmBotSystem:
                 print("[!] Invalid input. Please enter a numeric command.")
 
     def handle_logic(self, cmd):
-        """Dispatcher function to handle logic based on menu selection"""
         self.flush_mailbox() # Clear queue before sending a new request
 
         if cmd == 0:
@@ -85,7 +82,8 @@ class FarmBotSystem:
                 if result["type"] == 6:
                     print(result)
                     self.mapping.update_base_camera_position(result["Current_X"], result["Current_Y"])
-                    raw_final_position = self.mapping.get_final_position(result)
+                    target_label = self.camera.get_current_detected_label()
+                    raw_final_position = self.mapping.get_final_position(result, object_label=target_label)
                     print(f"\nRaw final positions: {raw_final_position}")
                     # print(f"\n[OK] Updated Base Pos: X={result['Current_X']}, Y={result['Current_Y']}")
             except queue.Empty:
@@ -107,7 +105,6 @@ class FarmBotSystem:
             print(f"\n[!] Command {cmd} is not yet implemented or invalid.")
 
     def run_system(self):
-        """Initializes and manages the lifecycle of all system threads"""
         print("--- System Starting ---")
 
         # 1. UART Listener Thread (Daemon: closes automatically when main thread exits)

@@ -7,6 +7,7 @@ from yolov5_trt import YoLov5TRT
 
 # Load calibration data
 Camera_params = np.load("/home/minhthong/Desktop/code/farmbot/calib-camera/camera_params.npz")
+Camera_offsets = np.load("/home/minhthong/Desktop/code/farmbot/calib-camera/camera_offset.npz")
 
 # =========================
 # Mapping class
@@ -22,14 +23,20 @@ class Mapping:
         self.numbers_of_bag = 0
         self.tissues_per_bag = None
         self.final_positions_lst = []
+
         # Homography and intrinsic matrix
-        self.H = Camera_params["H_bag"]
+        self.H_tissue = Camera_params["H_tissue"]
+        self.H_bag = Camera_params["H_bag"]
+        self.H = self.H_bag                                 # Default is Homo of bag
         self.K = Camera_params["K"]
         
         # Fixed mechanical offset (camera -> gripper), measured manually
         # self.camera_gripper_mm = np.array([16.0, -24.25], dtype=np.float32)
-        self.camera_gripper_mm = np.array([11.0, -29.25], dtype=np.float32)
-
+        # self.camera_gripper_mm = np.array([11.0, -29.25], dtype=np.float32)
+        self.offset_tissue = Camera_offsets["offset_tissue"] * -1.0
+        self.offset_bag = Camera_offsets["offset_bag"] * -1.0
+        self.camera_gripper_mm = self.offset_bag            # Default is offset of bag
+        #print(self.offset_bag, self.offset_tissue, self.camera_gripper_mm)
         # Current camera position in base coordinate (updated externally)
         self.base_camera_mm = np.array([0.0, 0.0], dtype=np.float32)
 
@@ -115,8 +122,7 @@ class Mapping:
 
                 # Calculate position: Base = Current_Robot + Offset_from_Camera - Mechanical_Offset
                 bag_base_mm = self.base_camera_mm + bag_offset
-                final_position = bag_base_mm - self.camera_gripper_mm
-
+                final_position = bag_base_mm - self.camera_gripper_mm    
                 target_x = final_position[0]
                 target_y = final_position[1]
 
@@ -134,32 +140,45 @@ class Mapping:
             return self.camera_bag_mm.copy()     
 
     def get_final_position(self, result, object_label=None):
-        # Wait in 1s
+        # Wait 1 second for the robot to stabilize
         time.sleep(1)
 
-        # Update axes from result
+        # Update motor axes from the current robot result
         self.uart.axes["X"] = result["Current_X"]
         self.uart.axes["Y"] = result["Current_Y"]
 
         # Update current position for calculating
         self.update_base_camera_position(self.uart.axes["X"], self.uart.axes["Y"])   
         
-        # Check the sample in the list
-        if object_label is None:
-            print("[ERROR] object_label is missing in get_final_position!")
-            return None
-        
+        # Select Homography matrix and camera-gripper offset based on object type
+        if object_label == "bag":
+            self.H = self.H_bag
+            self.camera_gripper_mm = self.offset_bag
+        else:
+            self.H = self.H_tissue
+            self.camera_gripper_mm = self.offset_tissue
+
+        # Recalculate optical center in mm using current Homography matrix
+        p_center = np.array([self.cx, self.cy, 1.0], dtype=np.float32)
+        P_center_mm = self.H @ p_center
+        self.center_mm = P_center_mm[:2] / P_center_mm[2]
+
+        # Get pixel coordinates from Camera thread safely
         if self.camera is not None:
-            # Route directly to specific item lists based on object_label
+            pixels = []
             if object_label == "bag":
-                pixels = self.camera.all_bag_pixels
-                self.update_object_from_pixel(pixels)
-            elif object_label == "strawberry":
+                pixels = self.camera.all_bag_pixels if self.camera.all_bag_pixels is not None else []
+            elif object_label in ["strawberry"]:
                 pixels = [t['center'] for t in self.camera.last_detected_strawberry]
-                self.update_object_from_pixel(pixels)
             elif object_label == "sweet potato":
                 pixels = [t['center'] for t in self.camera.last_detected_sweet_potato]
+
+            # Convert pixels to mm if list is not empty
+            if pixels:
                 self.update_object_from_pixel(pixels)
+            else:
+                with self.lock:
+                    self.camera_bag_mm = None
             
         # Calculate final position
         final_position = self.compute_final_base_position()
@@ -275,7 +294,9 @@ class Mapping:
 
                         # Computing final position now
                         # raw_final_position = self.compute_final_base_position()
-                        raw_final_position = self.get_final_position(result)
+                        label = self.camera.get_current_detected_label()
+                        raw_final_position = self.get_final_position(result, object_label=label)
+                        print(label)
                         print(f"Raw final position: {raw_final_position}")
                         if raw_final_position is not None:
                             list_raw_final_position.append(raw_final_position)
@@ -1009,9 +1030,17 @@ class CameraDetect(threading.Thread):
             cv2.destroyAllWindows()
         print("[DISPLAY] Display loop stopped.")
 
-    # ==========================================================
-    # Detection pipeline
-    # ==========================================================
+    # This function only use for returning the current label outside this class
+    def get_current_detected_label(self):
+        if self.all_bag_pixels and len(self.all_bag_pixels) > 0:
+            return "bag"
+        elif self.last_detected_strawberry and len(self.last_detected_strawberry) > 0:
+            return "strawberry"
+        elif self.last_detected_sweet_potato and len(self.last_detected_sweet_potato) > 0:
+            return "sweet potato"
+        return None
+
+    # Detection pipeline function
     def is_real_bbox(self, x, y, w, h, frame_w=640, frame_h=480, margin=15):
         # Calculate max boundaries
         x_min = x
